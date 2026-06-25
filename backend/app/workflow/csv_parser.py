@@ -18,12 +18,23 @@ def parse_task_csv(file_path: str | Path) -> dict:
             return {}
 
     # Normalize keys (case-insensitive)
-    normalized = {k.strip().lower().replace(" ", "_"): v.strip() for k, v in row.items() if k}
+    normalized = {k.strip().lower().replace(" ", "_"): (v or "").strip() for k, v in row.items() if k}
+
+    description = (
+        normalized.get("description")
+        or normalized.get("summary")
+        or normalized.get("issue_description")
+        or normalized.get("details")
+        or normalized.get("body")
+        or ""
+    )
+    title = normalized.get("title") or normalized.get("summary") or normalized.get("issue_key", "")
 
     return {
         "task_id": normalized.get("task_id") or normalized.get("id", ""),
-        "title": normalized.get("title", ""),
-        "description": normalized.get("description", ""),
+        "title": title,
+        "description": description,
+        "jira_key": normalized.get("jira_key") or normalized.get("issue_key") or normalized.get("key", ""),
         "status": normalized.get("status", ""),
         "raw": row,
     }

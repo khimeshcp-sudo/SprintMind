@@ -8,10 +8,13 @@ import {
   RefreshCw,
   FileText,
   Paperclip,
+  Square,
+  RotateCcw,
 } from 'lucide-react'
 import { api } from '../api/client'
 import WorkflowProgress from '../components/WorkflowProgress'
 import ApprovalModal from '../components/ApprovalModal'
+import PlanView from '../components/PlanView'
 
 function statusBadge(status) {
   const map = {
@@ -19,6 +22,7 @@ function statusBadge(status) {
     in_progress: 'bg-blue-500/20 text-blue-300',
     completed: 'bg-green-500/20 text-green-300',
     failed: 'bg-red-500/20 text-red-300',
+    cancelled: 'bg-orange-500/20 text-orange-300',
     running: 'bg-blue-500/20 text-blue-300',
     waiting_approval: 'bg-amber-500/20 text-amber-300',
   }
@@ -49,7 +53,7 @@ export default function TaskDetail() {
     try {
       const w = await api.getWorkflow(id)
       setWorkflow(w)
-      if (w.status === 'completed' || w.status === 'failed') {
+      if (w.status === 'completed' || w.status === 'failed' || w.status === 'cancelled') {
         setPolling(false)
       }
       return w
@@ -116,6 +120,47 @@ export default function TaskDetail() {
     }
   }
 
+  const stopFlow = async () => {
+    setActionLoading(true)
+    setError('')
+    try {
+      const w = await api.stopWorkflow(id)
+      setWorkflow(w)
+      setPolling(false)
+    } catch (err) {
+      setError(err.message)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const restartFlow = async () => {
+    setActionLoading(true)
+    setPolling(true)
+    setError('')
+    try {
+      const stepDefs = await api.workflowSteps().catch(() => [])
+      setWorkflow({
+        status: 'running',
+        progress_percent: 0,
+        current_step: 'parse_requirement',
+        steps: stepDefs.map((s) => ({
+          ...s,
+          status: s.id === 'parse_requirement' ? 'running' : 'pending',
+        })),
+        waiting_approval: null,
+      })
+      const w = await api.restartWorkflow(id)
+      setWorkflow(w)
+      await loadTask()
+    } catch (err) {
+      setError(err.message)
+      setPolling(false)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   const handleApproval = async (approved, feedback) => {
     setActionLoading(true)
     setPolling(true)
@@ -152,12 +197,29 @@ export default function TaskDetail() {
     )
   }
 
-  const canStart = !workflow || workflow.status === 'completed' || workflow.status === 'failed'
+  const isActive =
+    workflow?.status === 'running' || workflow?.status === 'waiting_approval'
+  const canStart =
+    !workflow ||
+    workflow.status === 'completed' ||
+    workflow.status === 'failed' ||
+    workflow.status === 'cancelled'
+
+  const approvalPayload =
+    workflow?.waiting_approval ||
+    (workflow?.status === 'waiting_approval' && workflow?.plan
+      ? {
+          gate: 'approval_plan',
+          title: 'Review Implementation Plan',
+          message: 'Review the AI-generated plan before code is written.',
+          data: workflow.plan,
+        }
+      : null)
 
   return (
     <div>
       <ApprovalModal
-        approval={workflow?.waiting_approval}
+        approval={approvalPayload}
         onDecide={handleApproval}
         loading={actionLoading}
       />
@@ -189,18 +251,38 @@ export default function TaskDetail() {
             )}
           </div>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-wrap gap-3">
           <button className="btn-secondary" onClick={refresh} disabled={actionLoading}>
             <RefreshCw className={`h-4 w-4 ${actionLoading ? 'animate-spin' : ''}`} /> Refresh
           </button>
-          {canStart && (
+          {isActive && (
+            <button className="btn-secondary text-orange-300" onClick={stopFlow} disabled={actionLoading}>
+              {actionLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <Square className="h-4 w-4" />
+              )}
+              Stop Flow
+            </button>
+          )}
+          {workflow && (
+            <button className="btn-secondary" onClick={restartFlow} disabled={actionLoading}>
+              {actionLoading ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : (
+                <RotateCcw className="h-4 w-4" />
+              )}
+              Restart from Start
+            </button>
+          )}
+          {canStart && !workflow && (
             <button className="btn-primary" onClick={startFlow} disabled={actionLoading}>
               {actionLoading ? (
                 <Loader2 className="h-4 w-4 animate-spin" />
               ) : (
                 <Play className="h-4 w-4" />
               )}
-              {workflow ? 'Restart AI Flow' : 'Start AI Flow'}
+              Start AI Flow
             </button>
           )}
         </div>
@@ -212,6 +294,19 @@ export default function TaskDetail() {
         </div>
       )}
 
+      {workflow?.session_error && (
+        <div className="mb-6 rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-3 text-sm text-orange-300">
+          {workflow.session_error}
+        </div>
+      )}
+
+      {workflow?.status === 'running' && workflow?.current_step === 'generate_plan' && (
+        <div className="mb-6 rounded-xl border border-brand-500/30 bg-brand-500/10 px-4 py-3 text-sm text-brand-200">
+          Generating plan with AI — local Ollama can take 1–3 minutes on CPU. For faster results, set{' '}
+          <code className="text-brand-300">LLM_PROVIDER=groq</code> in <code className="text-brand-300">.env</code>.
+        </div>
+      )}
+
       <div className="grid gap-6 lg:grid-cols-5">
         <div className="card lg:col-span-3">
           <h2 className="mb-6 text-lg font-semibold">LangGraph AI Pipeline</h2>
@@ -220,14 +315,15 @@ export default function TaskDetail() {
               steps={workflow.steps}
               progressPercent={workflow.progress_percent}
               status={workflow.status}
+              cancelMessage={workflow.cancel_message}
             />
           ) : (
             <div className="py-12 text-center text-gray-500">
               <Bot className="mx-auto mb-4 h-12 w-12 text-surface-600" />
               <p>No workflow started yet.</p>
               <p className="mt-2 text-sm">
-                Click <strong>Start AI Flow</strong> to read the CSV, generate a plan, write code,
-                run tests, and deploy — with approval at every step.
+                Click <strong>Start AI Flow</strong> to read the CSV description, send it to AI for a plan,
+                then continue with code, tests, and deploy.
               </p>
             </div>
           )}
@@ -236,10 +332,7 @@ export default function TaskDetail() {
         <div className="space-y-6 lg:col-span-2">
           {workflow?.plan && (
             <div className="card">
-              <h3 className="mb-3 font-semibold">Implementation Plan</h3>
-              <pre className="max-h-48 overflow-y-auto whitespace-pre-wrap text-xs text-gray-400">
-                {JSON.stringify(workflow.plan, null, 2)}
-              </pre>
+              <PlanView plan={workflow.plan} revision={workflow.plan_revision || 0} />
             </div>
           )}
           {workflow?.test_results && (

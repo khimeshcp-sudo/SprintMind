@@ -57,6 +57,19 @@ services:
       MAGENTO_PROJECT_PATH: /app/magento
       MAGENTO_GIT_BASE_BRANCH: ${MAGENTO_GIT_BASE_BRANCH:-main}
       MAGENTO_GIT_CREATE_BRANCH: ${MAGENTO_GIT_CREATE_BRANCH:-true}
+      LLM_DEBUG: ${LLM_DEBUG:-true}
+      LLM_DEBUG_FULL: ${LLM_DEBUG_FULL:-true}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-180}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.1-8b-instant}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.0-flash-lite}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:1b}
     volumes:
       - ./backend/app:/app/app
       - ./deploy:/app/deploy
@@ -76,6 +89,8 @@ services:
       start_period: 15s
     networks:
       - sprintmind
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   frontend:
     build:

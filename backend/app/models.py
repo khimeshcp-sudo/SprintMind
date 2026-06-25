@@ -24,6 +24,7 @@ class WorkflowStatus(str, enum.Enum):
     WAITING_APPROVAL = "waiting_approval"
     COMPLETED = "completed"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class SubscriptionStatus(str, enum.Enum):

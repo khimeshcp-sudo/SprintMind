@@ -6,14 +6,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import Task, User, WorkflowStatus
+from app.models import User, WorkflowStatus
 from app.routers.tasks import _get_task_or_404
 from app.workflow.runner import (
     build_workflow_response,
     create_workflow_run,
     get_workflow_for_task,
+    refresh_workflow_run,
+    restart_workflow,
+    restart_workflow_background,
     resume_workflow_background,
     start_workflow_background,
+    stop_workflow,
 )
 from app.workflow.steps import WORKFLOW_STEPS
 
@@ -54,6 +58,33 @@ async def workflow_start(
     return build_workflow_response(run)
 
 
+@router.post("/{task_id}/workflow/stop")
+async def workflow_stop(
+    task_id: int,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    await _get_task_or_404(db, task_id, user)
+    try:
+        run = await stop_workflow(db, task_id, user.id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return build_workflow_response(run)
+
+
+@router.post("/{task_id}/workflow/restart")
+async def workflow_restart(
+    task_id: int,
+    background_tasks: BackgroundTasks,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    task = await _get_task_or_404(db, task_id, user)
+    run, requirement = await restart_workflow(db, task, user.id)
+    background_tasks.add_task(restart_workflow_background, run.id, requirement)
+    return build_workflow_response(run)
+
+
 @router.get("/{task_id}/workflow")
 async def workflow_status(
     task_id: int,
@@ -64,6 +95,7 @@ async def workflow_status(
     run = await get_workflow_for_task(db, task_id, user.id)
     if not run:
         raise HTTPException(status_code=404, detail="No workflow found. Start AI flow first.")
+    run = await refresh_workflow_run(db, run)
     return build_workflow_response(run)
 
 
@@ -79,6 +111,8 @@ async def workflow_resume(
     run = await get_workflow_for_task(db, task_id, user.id)
     if not run:
         raise HTTPException(status_code=404, detail="No workflow found")
+    if run.status == WorkflowStatus.CANCELLED:
+        raise HTTPException(status_code=400, detail="Workflow was stopped")
     if run.status != WorkflowStatus.WAITING_APPROVAL:
         raise HTTPException(status_code=400, detail="Workflow is not waiting for approval")
 

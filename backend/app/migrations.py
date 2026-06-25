@@ -28,6 +28,11 @@ async def migrate_schema(conn: AsyncConnection) -> None:
         except Exception:
             pass
 
+    try:
+        await conn.execute(text("ALTER TYPE workflowstatus ADD VALUE IF NOT EXISTS 'CANCELLED'"))
+    except Exception:
+        pass
+
     # Unique indexes for stripe ids (postgres)
     index_statements = [
         "CREATE UNIQUE INDEX IF NOT EXISTS ix_users_stripe_customer_id ON users (stripe_customer_id) WHERE stripe_customer_id IS NOT NULL",

@@ -19,7 +19,7 @@ function StepIcon({ status }) {
   return <Circle className="h-5 w-5 text-gray-600" />
 }
 
-export default function WorkflowProgress({ steps = [], progressPercent = 0, status }) {
+export default function WorkflowProgress({ steps = [], progressPercent = 0, status, cancelMessage }) {
   return (
     <div className="space-y-6">
       <div>
@@ -38,6 +38,11 @@ export default function WorkflowProgress({ steps = [], progressPercent = 0, stat
         )}
         {status === 'running' && (
           <p className="mt-2 text-xs text-brand-300">AI agents are working…</p>
+        )}
+        {status === 'cancelled' && (
+          <p className="mt-2 text-xs text-orange-300">
+            {cancelMessage || 'Workflow stopped.'}
+          </p>
         )}
       </div>
 

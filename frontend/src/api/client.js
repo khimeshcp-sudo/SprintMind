@@ -102,6 +102,8 @@ export const api = {
 
   workflowSteps: () => request('/api/tasks/workflow/steps'),
   startWorkflow: (taskId) => request(`/api/tasks/${taskId}/workflow/start`, { method: 'POST' }),
+  stopWorkflow: (taskId) => request(`/api/tasks/${taskId}/workflow/stop`, { method: 'POST' }),
+  restartWorkflow: (taskId) => request(`/api/tasks/${taskId}/workflow/restart`, { method: 'POST' }),
   getWorkflow: (taskId) => request(`/api/tasks/${taskId}/workflow`),
   resumeWorkflow: (taskId, body) =>
     request(`/api/tasks/${taskId}/workflow/resume`, { method: 'POST', body }),

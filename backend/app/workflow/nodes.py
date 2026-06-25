@@ -17,8 +17,13 @@ from app.workflow.codegen import (
     resolve_workspace,
     write_files,
 )
-from app.workflow.csv_parser import parse_task_csv
 from app.workflow.llm import generate, parse_json_from_llm
+from app.workflow.plan_prompts import (
+    PLAN_SYSTEM,
+    build_plan_from_response,
+    build_plan_user_message,
+    enrich_requirement,
+)
 from app.workflow.repo_analysis import analyze_repository, ensure_git_branch, extract_keywords
 from app.workflow.state import WorkflowGraphState
 from app.workflow.steps import STEP_ORDER
@@ -49,53 +54,51 @@ def _complete_prior_steps(state: WorkflowGraphState, through_step: str) -> dict:
 
 
 async def parse_requirement_node(state: WorkflowGraphState) -> dict:
-    req = dict(state.get("requirement") or {})
-    file_path = req.get("file_path")
-    if file_path:
-        parsed = parse_task_csv(file_path)
-        req.update({k: v for k, v in parsed.items() if v})
+    req = enrich_requirement(state.get("requirement") or {})
 
     update = _set_step(state, "parse_requirement", "running")
     update.update(_complete_prior_steps({**state, **update}, "parse_requirement"))
     statuses = dict(update.get("step_statuses") or {})
     statuses["parse_requirement"] = "completed"
 
-    keywords = extract_keywords(req)
-    repo = analyze_repository(keywords=keywords)
-
     return {
         **update,
         "requirement": req,
-        "repo_analysis": repo,
         "step_statuses": statuses,
         "current_step": "generate_plan",
     }
 
 
 async def generate_plan_node(state: WorkflowGraphState) -> dict:
-    req = state.get("requirement", {})
-    feedback = state.get("approval_feedback", "")
-    system = (
-        "You are a Magento 2 planning agent. Read the task requirement (title, description, CSV fields) "
-        "and produce an implementation plan. Return JSON with keys: "
-        "title, summary, frontend_tasks (array), backend_tasks (array), test_approach (array), "
-        "risks (array), estimate_hours (number). Tailor every field to the specific task — do not use generic placeholders."
-    )
-    user_payload = dict(req)
+    req = enrich_requirement(state.get("requirement") or {})
+    feedback = (state.get("approval_feedback") or "").strip()
+    revision = int(state.get("plan_revision") or 0)
     if feedback:
-        user_payload["revision_feedback"] = feedback
-    raw = await generate(system, json.dumps(user_payload, indent=2))
-    try:
-        plan = parse_json_from_llm(raw)
-        if isinstance(plan, list):
-            plan = plan[0] if plan else {}
-    except Exception:
-        plan = {"title": req.get("title", "Task"), "summary": req.get("description", ""), "frontend_tasks": [], "backend_tasks": []}
+        revision += 1
+
+    user_message = build_plan_user_message(req, feedback=feedback)
+    if not user_message or user_message.strip() in ("{}", "''"):
+        import logging
+        logging.getLogger(__name__).error(
+            "Plan input empty — requirement=%s file_path=%s",
+            req,
+            req.get("file_path"),
+        )
+        user_message = build_plan_user_message(
+            {"title": "Task", "description": "No CSV description found — check task has CSV uploaded"},
+            feedback=feedback,
+        )
+
+    raw = await generate(PLAN_SYSTEM, user_message)
+    plan = build_plan_from_response(req, raw, revision=revision, feedback=feedback)
 
     statuses = dict(state.get("step_statuses") or {})
     statuses["generate_plan"] = "completed"
     return {
         "plan": plan,
+        "plan_revision": revision,
+        "requirement": req,
+        "approval_feedback": "",
         "step_statuses": statuses,
         "current_step": "approval_plan",
     }
@@ -116,13 +119,15 @@ async def approval_plan_node(state: WorkflowGraphState) -> dict:
     if not approved:
         return {
             "approval_feedback": feedback,
+            "plan": None,
             "step_statuses": statuses,
             "current_step": "generate_plan",
             "waiting_approval": None,
         }
 
     req = state.get("requirement") or {}
-    repo = state.get("repo_analysis") or {}
+    keywords = extract_keywords(req)
+    repo = analyze_repository(keywords=keywords)
     git_result = ensure_git_branch(
         req,
         branch_strategy=repo.get("branch_strategy"),
@@ -131,6 +136,7 @@ async def approval_plan_node(state: WorkflowGraphState) -> dict:
     return {
         "approval_feedback": feedback,
         "step_statuses": statuses,
+        "repo_analysis": repo,
         "git_branch": git_result,
         "current_step": "write_code",
         "waiting_approval": None,
@@ -168,7 +174,11 @@ async def write_code_node(state: WorkflowGraphState) -> dict:
         "Paths must be under app/code/, app/design/, or view/. Include registration.php and module.xml when "
         "creating a module. Escape newlines in content properly for JSON."
     )
-    user_payload = {"requirement": req, "plan": plan}
+    user_payload = {
+        "requirement": req,
+        "plan": plan,
+        "plan_text": plan.get("content") or plan.get("summary") or "",
+    }
     if feedback:
         user_payload["revision_feedback"] = feedback
 
