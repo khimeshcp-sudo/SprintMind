@@ -41,4 +41,28 @@ app.include_router(billing.router)
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok", "service": "sprintmind-api"}
+    import shutil
+    from pathlib import Path
+
+    from app.workflow.repo_analysis import resolve_project_root
+
+    root = resolve_project_root()
+    magento = {
+        "project_path": settings.magento_project_path or None,
+        "mounted": str(root) if root else None,
+        "git_available": shutil.which("git") is not None,
+        "git_create_branch": settings.magento_git_create_branch,
+        "git_base_branch": settings.magento_git_base_branch,
+    }
+    if root and shutil.which("git"):
+        import subprocess
+        proc = subprocess.run(
+            ["git", "-c", f"safe.directory={root.resolve()}", "branch", "--show-current"],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        magento["current_branch"] = (proc.stdout or "").strip() or None
+
+    return {"status": "ok", "service": "sprintmind-api", "magento": magento}

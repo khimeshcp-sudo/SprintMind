@@ -54,11 +54,15 @@ services:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-sprintmind}:${POSTGRES_PASSWORD:-sprintmind}@postgres:5432/${POSTGRES_DB:-sprintmind}
       CORS_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost:3001,http://localhost
       FRONTEND_URL: http://localhost:3001
+      MAGENTO_PROJECT_PATH: /app/magento
+      MAGENTO_GIT_BASE_BRANCH: ${MAGENTO_GIT_BASE_BRANCH:-main}
+      MAGENTO_GIT_CREATE_BRANCH: ${MAGENTO_GIT_CREATE_BRANCH:-true}
     volumes:
       - ./backend/app:/app/app
       - ./deploy:/app/deploy
       - ./data/uploads:/app/data/uploads
       - ./data/workspace:/app/data/workspace
+      - "${MAGENTO_PROJECT_PATH:-/home/cp/Downloads/mage249 1}:/app/magento:rw"
     ports:
       - "8000:8000"
     depends_on:

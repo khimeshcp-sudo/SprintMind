@@ -6,6 +6,7 @@ import json
 import re
 from pathlib import Path
 
+from app.config import settings
 from app.workflow.llm import parse_json_from_llm
 
 
@@ -17,6 +18,18 @@ def _slug(text: str) -> str:
 def _module_name(requirement: dict, plan: dict) -> str:
     title = plan.get("title") or requirement.get("title") or "Feature"
     return f"SprintMind_{_slug(title)}"
+
+
+def resolve_workspace(task_id: int) -> Path:
+    """Prefer real Magento project root; fall back to isolated task workspace."""
+    from app.workflow.repo_analysis import resolve_project_root
+
+    root = resolve_project_root()
+    if root:
+        return root
+    workspace = Path(settings.workflow_workspace) / str(task_id)
+    workspace.mkdir(parents=True, exist_ok=True)
+    return workspace
 
 
 def safe_workspace_path(workspace: Path, relative: str) -> Path | None:

@@ -12,6 +12,8 @@ class WorkflowGraphState(TypedDict, total=False):
     thread_id: str
     requirement: dict
     plan: dict
+    repo_analysis: dict
+    git_branch: dict
     code_artifacts: list[dict]
     test_cases: list[dict]
     test_results: dict

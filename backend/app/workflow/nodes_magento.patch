@@ -1,0 +1,31 @@
+# Apply after fixing file ownership: sudo chown cp:cp backend/app/workflow/nodes.py backend/app/workflow/state.py backend/app/workflow/runner.py
+# Then integrate these changes manually or via: patch -p1 < nodes_magento.patch
+
+--- a/backend/app/workflow/state.py
++++ b/backend/app/workflow/state.py
+@@ -11,6 +11,7 @@
+     thread_id: str
+     requirement: dict
+     plan: dict
++    repo_analysis: dict
+     code_artifacts: list[dict]
+
+--- a/backend/app/workflow/nodes.py
++++ b/backend/app/workflow/nodes.py
+@@ -9,6 +9,7 @@
+ from langgraph.types import interrupt
+ 
+ from app.config import settings
++from app.workflow.agent_prompts import CODE_SYSTEM, PLAN_SYSTEM
+ from app.workflow.codegen import (
+     fallback_code_files,
+     fallback_smoke_checks,
+     fallback_test_files,
+     parse_files_from_llm,
++    resolve_workspace,
+     write_files,
+ )
+ from app.workflow.csv_parser import parse_task_csv
+ from app.workflow.llm import generate, parse_json_from_llm
++from app.workflow.repo_analysis import analyze_repository, extract_keywords
+ from app.workflow.state import WorkflowGraphState

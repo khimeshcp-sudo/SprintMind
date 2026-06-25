@@ -264,6 +264,8 @@ def build_workflow_response(run: WorkflowRun) -> dict[str, Any]:
         "production_deploy": state.get("production_deploy"),
         "production_smoke": state.get("production_smoke"),
         "requirement": state.get("requirement"),
+        "repo_analysis": state.get("repo_analysis"),
+        "git_branch": state.get("git_branch"),
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
     }

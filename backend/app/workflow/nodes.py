@@ -14,10 +14,12 @@ from app.workflow.codegen import (
     fallback_smoke_checks,
     fallback_test_files,
     parse_files_from_llm,
+    resolve_workspace,
     write_files,
 )
 from app.workflow.csv_parser import parse_task_csv
 from app.workflow.llm import generate, parse_json_from_llm
+from app.workflow.repo_analysis import analyze_repository, ensure_git_branch, extract_keywords
 from app.workflow.state import WorkflowGraphState
 from app.workflow.steps import STEP_ORDER
 
@@ -57,9 +59,14 @@ async def parse_requirement_node(state: WorkflowGraphState) -> dict:
     update.update(_complete_prior_steps({**state, **update}, "parse_requirement"))
     statuses = dict(update.get("step_statuses") or {})
     statuses["parse_requirement"] = "completed"
+
+    keywords = extract_keywords(req)
+    repo = analyze_repository(keywords=keywords)
+
     return {
         **update,
         "requirement": req,
+        "repo_analysis": repo,
         "step_statuses": statuses,
         "current_step": "generate_plan",
     }
@@ -113,11 +120,21 @@ async def approval_plan_node(state: WorkflowGraphState) -> dict:
             "current_step": "generate_plan",
             "waiting_approval": None,
         }
+
+    req = state.get("requirement") or {}
+    repo = state.get("repo_analysis") or {}
+    git_result = ensure_git_branch(
+        req,
+        branch_strategy=repo.get("branch_strategy"),
+    )
+
     return {
         "approval_feedback": feedback,
         "step_statuses": statuses,
+        "git_branch": git_result,
         "current_step": "write_code",
         "waiting_approval": None,
+        "errors": [] if git_result.get("success") else [git_result.get("error", "Git branch setup failed")],
     }
 
 
@@ -126,8 +143,23 @@ async def write_code_node(state: WorkflowGraphState) -> dict:
     req = state.get("requirement", {})
     plan = state.get("plan", {})
     feedback = state.get("approval_feedback", "")
-    workspace = Path(settings.workflow_workspace) / str(task_id)
-    workspace.mkdir(parents=True, exist_ok=True)
+    repo = state.get("repo_analysis") or {}
+
+    git_result = dict(state.get("git_branch") or {})
+    if not git_result.get("success"):
+        git_result = ensure_git_branch(req, branch_strategy=repo.get("branch_strategy"))
+
+    if not git_result.get("success") and not git_result.get("skipped"):
+        statuses = dict(state.get("step_statuses") or {})
+        statuses["write_code"] = "failed"
+        return {
+            "git_branch": git_result,
+            "step_statuses": statuses,
+            "current_step": "write_code",
+            "errors": [git_result.get("error", "Git branch must be created before writing code")],
+        }
+
+    workspace = resolve_workspace(task_id)
 
     system = (
         "You are a Magento 2 developer. Generate production-ready code from the requirement and plan. "
@@ -150,6 +182,7 @@ async def write_code_node(state: WorkflowGraphState) -> dict:
     statuses["write_code"] = "completed"
     return {
         "code_artifacts": artifacts,
+        "git_branch": git_result,
         "step_statuses": statuses,
         "current_step": "approval_code",
     }
@@ -232,7 +265,7 @@ async def run_tests_node(state: WorkflowGraphState) -> dict:
     plan = state.get("plan", {})
     cases = state.get("test_cases", [])
     artifacts = state.get("code_artifacts", [])
-    workspace = Path(settings.workflow_workspace) / str(task_id)
+    workspace = resolve_workspace(task_id)
 
     system = (
         "You are a Magento PHPUnit expert. Generate PHPUnit test files from approved test cases and code. "
