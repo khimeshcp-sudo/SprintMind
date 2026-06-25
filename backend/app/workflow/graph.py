@@ -7,19 +7,25 @@ from langgraph.graph import END, START, StateGraph
 
 from app.workflow.nodes import (
     approval_code_node,
+    approval_deploy_staging_node,
     approval_plan_node,
     approval_production_node,
+    approval_smoke_staging_node,
     approval_staging_node,
     approval_test_run_node,
     approval_tests_node,
+    create_branch_node,
     deploy_production_node,
     deploy_staging_node,
     generate_plan_node,
     generate_tests_node,
     parse_requirement_node,
     route_after_code_approval,
+    route_after_create_branch,
+    route_after_deploy_staging_approval,
     route_after_plan_approval,
     route_after_production_approval,
+    route_after_smoke_staging_approval,
     route_after_staging_approval,
     route_after_test_run_approval,
     route_after_tests_approval,
@@ -33,6 +39,12 @@ from app.workflow.steps import STEP_ORDER
 
 _checkpointer = MemorySaver()
 _compiled_graph = None
+
+
+def reset_workflow_graph() -> None:
+    """Clear cached graph (e.g. after structural changes)."""
+    global _compiled_graph
+    _compiled_graph = None
 
 
 def build_workflow():
@@ -51,7 +63,10 @@ def build_workflow():
     g.add_node("approval_tests", approval_tests_node)
     g.add_node("run_tests", run_tests_node)
     g.add_node("approval_test_run", approval_test_run_node)
+    g.add_node("create_branch", create_branch_node)
+    g.add_node("approval_deploy_staging", approval_deploy_staging_node)
     g.add_node("deploy_staging", deploy_staging_node)
+    g.add_node("approval_smoke_staging", approval_smoke_staging_node)
     g.add_node("smoke_staging", smoke_staging_node)
     g.add_node("approval_staging", approval_staging_node)
     g.add_node("deploy_production", deploy_production_node)
@@ -77,14 +92,26 @@ def build_workflow():
     })
     g.add_edge("run_tests", "approval_test_run")
     g.add_conditional_edges("approval_test_run", route_after_test_run_approval, {
-        "deploy_staging": "deploy_staging",
+        "create_branch": "create_branch",
         "run_tests": "run_tests",
     })
-    g.add_edge("deploy_staging", "smoke_staging")
+    g.add_conditional_edges("create_branch", route_after_create_branch, {
+        "approval_deploy_staging": "approval_deploy_staging",
+        "create_branch": "create_branch",
+    })
+    g.add_conditional_edges("approval_deploy_staging", route_after_deploy_staging_approval, {
+        "deploy_staging": "deploy_staging",
+        "approval_deploy_staging": "approval_deploy_staging",
+    })
+    g.add_edge("deploy_staging", "approval_smoke_staging")
+    g.add_conditional_edges("approval_smoke_staging", route_after_smoke_staging_approval, {
+        "smoke_staging": "smoke_staging",
+        "approval_smoke_staging": "approval_smoke_staging",
+    })
     g.add_edge("smoke_staging", "approval_staging")
     g.add_conditional_edges("approval_staging", route_after_staging_approval, {
         "deploy_production": "deploy_production",
-        "deploy_staging": "deploy_staging",
+        "approval_staging": "approval_staging",
     })
     g.add_edge("deploy_production", "smoke_production")
     g.add_edge("smoke_production", "approval_production")

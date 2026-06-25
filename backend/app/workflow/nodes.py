@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import subprocess
 from pathlib import Path
@@ -9,6 +10,13 @@ from pathlib import Path
 from langgraph.types import interrupt
 
 from app.config import settings
+from app.workflow.branch import (
+    branch_exists,
+    create_branch,
+    get_git_repo_path,
+    next_default_branch_name,
+    validate_branch_name,
+)
 from app.workflow.codegen import (
     fallback_code_files,
     fallback_smoke_checks,
@@ -20,6 +28,16 @@ from app.workflow.csv_parser import parse_task_csv
 from app.workflow.llm import generate, parse_json_from_llm
 from app.workflow.state import WorkflowGraphState
 from app.workflow.steps import STEP_ORDER
+
+
+def _parse_approval_decision(decision: dict, gate: str) -> tuple[bool, str]:
+    """Only reject resume payloads explicitly targeted at a different gate."""
+    decision_gate = decision.get("gate")
+    if decision_gate and decision_gate != gate:
+        return False, ""
+    if decision.get("action") in ("create", "skip"):
+        return False, ""
+    return bool(decision.get("approved", False)), str(decision.get("feedback", ""))
 
 
 def _set_step(state: WorkflowGraphState, step: str, status: str = "running") -> dict:
@@ -102,8 +120,7 @@ async def approval_plan_node(state: WorkflowGraphState) -> dict:
         "data": state.get("plan"),
     }
     decision = interrupt(payload)
-    approved = bool(decision.get("approved", False))
-    feedback = str(decision.get("feedback", ""))
+    approved, feedback = _parse_approval_decision(decision, "approval_plan")
     statuses = dict(state.get("step_statuses") or {})
     statuses["approval_plan"] = "completed" if approved else "failed"
     if not approved:
@@ -166,7 +183,7 @@ async def approval_code_node(state: WorkflowGraphState) -> dict:
             "requirement": state.get("requirement"),
         },
     })
-    approved = bool(decision.get("approved", False))
+    approved, _ = _parse_approval_decision(decision, "approval_code")
     statuses = dict(state.get("step_statuses") or {})
     statuses["approval_code"] = "completed" if approved else "failed"
     if not approved:
@@ -218,7 +235,7 @@ async def approval_tests_node(state: WorkflowGraphState) -> dict:
         "message": "Approve test cases before execution.",
         "data": state.get("test_cases", []),
     })
-    approved = bool(decision.get("approved", False))
+    approved, _ = _parse_approval_decision(decision, "approval_tests")
     statuses = dict(state.get("step_statuses") or {})
     statuses["approval_tests"] = "completed" if approved else "failed"
     if not approved:
@@ -299,11 +316,94 @@ async def approval_test_run_node(state: WorkflowGraphState) -> dict:
         "message": "All tests passed. Approve staging deployment?",
         "data": state.get("test_results"),
     })
-    approved = bool(decision.get("approved", False))
+    approved, _ = _parse_approval_decision(decision, "approval_test_run")
     statuses = dict(state.get("step_statuses") or {})
     statuses["approval_test_run"] = "completed" if approved else "failed"
     if not approved:
         return {"step_statuses": statuses, "current_step": "run_tests"}
+    return {"step_statuses": statuses, "current_step": "create_branch"}
+
+
+async def create_branch_node(state: WorkflowGraphState) -> dict:
+    repo_path = get_git_repo_path()
+    default_branch_name = next_default_branch_name(repo_path)
+    validation_error = state.get("branch_validation_error")
+
+    payload = {
+        "gate": "create_branch",
+        "title": "Create a New Branch",
+        "message": "Enter a branch name or skip to use the default name shown below.",
+        "data": {
+            "default_branch_name": default_branch_name,
+            "validation_error": validation_error,
+        },
+    }
+    decision = interrupt(payload)
+
+    if decision.get("gate") not in (None, "create_branch"):
+        return {
+            "branch_validation_error": "Unexpected workflow resume. Please try again.",
+            "step_statuses": dict(state.get("step_statuses") or {}),
+            "current_step": "create_branch",
+        }
+
+    statuses = dict(state.get("step_statuses") or {})
+    action = str(decision.get("action", "skip")).lower()
+    if action == "skip":
+        branch_name = default_branch_name
+    else:
+        branch_name = str(decision.get("branch_name", "")).strip()
+        valid, error = validate_branch_name(branch_name)
+        if not valid:
+            return {
+                "branch_validation_error": error,
+                "step_statuses": statuses,
+                "current_step": "create_branch",
+            }
+        if branch_exists(branch_name, repo_path):
+            return {
+                "branch_validation_error": "Branch already exists. Please choose a different branch name.",
+                "step_statuses": statuses,
+                "current_step": "create_branch",
+            }
+
+    result = await asyncio.to_thread(create_branch, branch_name, repo_path)
+    if not result.get("success"):
+        return {
+            "branch_validation_error": result.get("error") or "Failed to create branch.",
+            "step_statuses": statuses,
+            "current_step": "create_branch",
+        }
+
+    statuses["create_branch"] = "completed"
+    return {
+        "git_branch": result,
+        "branch_validation_error": None,
+        "step_statuses": statuses,
+        "current_step": "approval_deploy_staging",
+    }
+
+
+async def approval_deploy_staging_node(state: WorkflowGraphState) -> dict:
+    decision = interrupt({
+        "gate": "approval_deploy_staging",
+        "title": "Approve Staging Deployment",
+        "message": "Review and approve deployment to the staging environment.",
+        "data": {
+            "git_branch": state.get("git_branch"),
+            "requirement": state.get("requirement"),
+            "plan": state.get("plan"),
+        },
+    })
+    approved, feedback = _parse_approval_decision(decision, "approval_deploy_staging")
+    statuses = dict(state.get("step_statuses") or {})
+    statuses["approval_deploy_staging"] = "completed" if approved else "failed"
+    if not approved:
+        return {
+            "approval_feedback": feedback,
+            "step_statuses": statuses,
+            "current_step": "approval_deploy_staging",
+        }
     return {"step_statuses": statuses, "current_step": "deploy_staging"}
 
 
@@ -327,8 +427,27 @@ async def deploy_staging_node(state: WorkflowGraphState) -> dict:
     return {
         "staging_deploy": {"success": success, "log": log, "environment": "staging"},
         "step_statuses": statuses,
-        "current_step": "smoke_staging",
+        "current_step": "approval_smoke_staging",
     }
+
+
+async def approval_smoke_staging_node(state: WorkflowGraphState) -> dict:
+    decision = interrupt({
+        "gate": "approval_smoke_staging",
+        "title": "Approve Staging Smoke Tests",
+        "message": "Staging deployment completed. Approve running smoke tests?",
+        "data": state.get("staging_deploy"),
+    })
+    approved, feedback = _parse_approval_decision(decision, "approval_smoke_staging")
+    statuses = dict(state.get("step_statuses") or {})
+    statuses["approval_smoke_staging"] = "completed" if approved else "failed"
+    if not approved:
+        return {
+            "approval_feedback": feedback,
+            "step_statuses": statuses,
+            "current_step": "approval_smoke_staging",
+        }
+    return {"step_statuses": statuses, "current_step": "smoke_staging"}
 
 
 async def smoke_staging_node(state: WorkflowGraphState) -> dict:
@@ -379,14 +498,18 @@ async def approval_staging_node(state: WorkflowGraphState) -> dict:
     decision = interrupt({
         "gate": "approval_staging",
         "title": "Approve Production Deploy",
-        "message": "Staging smoke tests passed. Deploy to production?",
+        "message": "Staging smoke tests passed. Approve deployment to production?",
         "data": {"deploy": state.get("staging_deploy"), "smoke": state.get("staging_smoke")},
     })
-    approved = bool(decision.get("approved", False))
+    approved, feedback = _parse_approval_decision(decision, "approval_staging")
     statuses = dict(state.get("step_statuses") or {})
     statuses["approval_staging"] = "completed" if approved else "failed"
     if not approved:
-        return {"step_statuses": statuses, "current_step": "deploy_staging"}
+        return {
+            "approval_feedback": feedback,
+            "step_statuses": statuses,
+            "current_step": "approval_staging",
+        }
     return {"step_statuses": statuses, "current_step": "deploy_production"}
 
 
@@ -421,12 +544,11 @@ async def approval_production_node(state: WorkflowGraphState) -> dict:
         "message": "Production smoke tests passed. Mark workflow complete?",
         "data": {"smoke": state.get("production_smoke")},
     })
-    approved = bool(decision.get("approved", False))
+    approved, _ = _parse_approval_decision(decision, "approval_production")
     statuses = dict(state.get("step_statuses") or {})
     statuses["approval_production"] = "completed" if approved else "failed"
     if not approved:
         return {"step_statuses": statuses, "current_step": "deploy_production"}
-    statuses["approval_production"] = "completed"
     statuses["finished"] = "completed"
     return {
         "step_statuses": statuses,
@@ -449,11 +571,32 @@ def route_after_tests_approval(state: WorkflowGraphState) -> str:
 
 
 def route_after_test_run_approval(state: WorkflowGraphState) -> str:
-    return "deploy_staging" if state.get("current_step") == "deploy_staging" else "run_tests"
+    return "create_branch" if state.get("current_step") == "create_branch" else "run_tests"
+
+
+def route_after_create_branch(state: WorkflowGraphState) -> str:
+    step = state.get("current_step")
+    if step == "approval_deploy_staging":
+        return "approval_deploy_staging"
+    return "create_branch"
+
+
+def route_after_deploy_staging_approval(state: WorkflowGraphState) -> str:
+    if state.get("current_step") == "deploy_staging":
+        return "deploy_staging"
+    return "approval_deploy_staging"
+
+
+def route_after_smoke_staging_approval(state: WorkflowGraphState) -> str:
+    if state.get("current_step") == "smoke_staging":
+        return "smoke_staging"
+    return "approval_smoke_staging"
 
 
 def route_after_staging_approval(state: WorkflowGraphState) -> str:
-    return "deploy_production" if state.get("current_step") == "deploy_production" else "deploy_staging"
+    if state.get("current_step") == "deploy_production":
+        return "deploy_production"
+    return "approval_staging"
 
 
 def route_after_production_approval(state: WorkflowGraphState) -> str:

@@ -37,7 +37,7 @@ export default function ApprovalModal({ approval, onDecide, loading }) {
           <button
             className="btn-primary flex-1"
             disabled={loading}
-            onClick={() => onDecide(true, feedback)}
+            onClick={() => onDecide(true, feedback, gate)}
           >
             {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
             Approve &amp; Continue
@@ -45,7 +45,7 @@ export default function ApprovalModal({ approval, onDecide, loading }) {
           <button
             className="btn-danger flex-1"
             disabled={loading}
-            onClick={() => onDecide(false, feedback)}
+            onClick={() => onDecide(false, feedback, gate)}
           >
             <X className="h-4 w-4" /> Reject / Revise
           </button>

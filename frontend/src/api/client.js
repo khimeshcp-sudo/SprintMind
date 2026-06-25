@@ -105,6 +105,8 @@ export const api = {
   getWorkflow: (taskId) => request(`/api/tasks/${taskId}/workflow`),
   resumeWorkflow: (taskId, body) =>
     request(`/api/tasks/${taskId}/workflow/resume`, { method: 'POST', body }),
+  validateBranchName: (branchName) =>
+    request('/api/tasks/workflow/branch/validate', { method: 'POST', body: { branch_name: branchName } }),
 
   listUsers: () => request('/api/users'),
   createUser: (body) => request('/api/users', { method: 'POST', body }),

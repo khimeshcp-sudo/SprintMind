@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://ollama:11434"
     ollama_model: str = "llama3.2"
     workflow_workspace: str = "/app/data/workspace"
+    git_repo_path: str = ""
 
     @property
     def ollama_enabled(self) -> bool:

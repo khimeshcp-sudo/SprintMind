@@ -15,6 +15,7 @@ class WorkflowGraphState(TypedDict, total=False):
     code_artifacts: list[dict]
     test_cases: list[dict]
     test_results: dict
+    git_branch: dict
     staging_deploy: dict
     staging_smoke: dict
     production_deploy: dict
@@ -23,5 +24,6 @@ class WorkflowGraphState(TypedDict, total=False):
     step_statuses: dict[str, str]
     waiting_approval: dict | None
     approval_feedback: str
+    branch_validation_error: str | None
     errors: Annotated[list[str], operator.add]
     finished: bool

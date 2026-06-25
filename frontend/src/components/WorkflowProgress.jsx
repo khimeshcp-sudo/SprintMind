@@ -1,4 +1,4 @@
-import { CheckCircle2, Circle, Loader2, XCircle, User } from 'lucide-react'
+import { CheckCircle2, Circle, GitBranch, Loader2, XCircle, User } from 'lucide-react'
 
 const ICONS = {
   file: '📄',
@@ -7,9 +7,18 @@ const ICONS = {
   code: '💻',
   test: '🧪',
   play: '▶️',
+  branch: '🌿',
   rocket: '🚀',
   check: '✅',
   flag: '🏁',
+}
+
+const ICON_BY_STEP_ID = {
+  create_branch: '🌿',
+}
+
+function getStepEmoji(step) {
+  return ICONS[step?.icon] || ICON_BY_STEP_ID[step?.id] || '•'
 }
 
 function StepIcon({ status }) {
@@ -34,7 +43,9 @@ export default function WorkflowProgress({ steps = [], progressPercent = 0, stat
           />
         </div>
         {status === 'waiting_approval' && (
-          <p className="mt-2 text-xs text-amber-300 animate-pulse">Waiting for your approval…</p>
+          <p className="mt-2 text-xs text-amber-300 animate-pulse">
+            Waiting for your input…
+          </p>
         )}
         {status === 'running' && (
           <p className="mt-2 text-xs text-brand-300">AI agents are working…</p>
@@ -44,6 +55,7 @@ export default function WorkflowProgress({ steps = [], progressPercent = 0, stat
       <ol className="relative space-y-0">
         {steps.map((step, i) => {
           const isApproval = step.id?.startsWith('approval')
+          const isBranchStep = step.id === 'create_branch'
           const isActive = step.status === 'running'
           const isDone = step.status === 'completed'
           return (
@@ -68,11 +80,12 @@ export default function WorkflowProgress({ steps = [], progressPercent = 0, stat
                 }`}
               >
                 <div className="flex items-center gap-2">
-                  <span className="text-base">{ICONS[step.icon] || '•'}</span>
+                  <span className="text-base">{getStepEmoji(step)}</span>
                   <span className={`text-sm font-medium ${isActive ? 'text-white' : 'text-gray-300'}`}>
                     {step.label}
                   </span>
                   {isApproval && <User className="h-3.5 w-3.5 text-amber-400" />}
+                  {isBranchStep && <GitBranch className="h-3.5 w-3.5 text-brand-400" />}
                 </div>
                 {isActive && (
                   <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-700">

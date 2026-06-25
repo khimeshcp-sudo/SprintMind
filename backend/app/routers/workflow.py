@@ -8,6 +8,7 @@ from app.auth import get_current_user
 from app.database import get_db
 from app.models import Task, User, WorkflowStatus
 from app.routers.tasks import _get_task_or_404
+from app.workflow.branch import branch_exists, get_git_repo_path, next_default_branch_name, validate_branch_name
 from app.workflow.runner import (
     build_workflow_response,
     create_workflow_run,
@@ -21,8 +22,37 @@ router = APIRouter(prefix="/api/tasks", tags=["workflow"])
 
 
 class WorkflowResumeRequest(BaseModel):
-    approved: bool = True
+    approved: bool = False
     feedback: str = ""
+    action: str | None = None
+    branch_name: str = ""
+    gate: str | None = None
+
+
+class BranchValidateRequest(BaseModel):
+    branch_name: str = ""
+
+
+@router.post("/workflow/branch/validate")
+async def validate_branch(body: BranchValidateRequest):
+    name = body.branch_name.strip()
+    valid, error = validate_branch_name(name)
+    if not valid:
+        return {"valid": False, "exists": False, "error": error}
+    exists = branch_exists(name)
+    if exists:
+        return {
+            "valid": False,
+            "exists": True,
+            "error": "Branch already exists. Please choose a different branch name.",
+        }
+    return {"valid": True, "exists": False, "error": None}
+
+
+@router.get("/workflow/branch/default-name")
+async def default_branch_name():
+    repo = get_git_repo_path()
+    return {"default_branch_name": next_default_branch_name(repo)}
 
 
 @router.get("/workflow/steps")
@@ -84,6 +114,7 @@ async def workflow_resume(
 
     run.status = WorkflowStatus.RUNNING
     state = dict(run.state_json or {})
+    pending_gate = body.gate or (state.get("pending_approval") or {}).get("gate")
     state.pop("pending_approval", None)
     run.state_json = state
     await db.commit()
@@ -94,5 +125,8 @@ async def workflow_resume(
         run.id,
         approved=body.approved,
         feedback=body.feedback,
+        action=body.action,
+        branch_name=body.branch_name,
+        gate=pending_gate,
     )
     return build_workflow_response(run)

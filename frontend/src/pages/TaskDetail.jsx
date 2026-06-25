@@ -12,6 +12,7 @@ import {
 import { api } from '../api/client'
 import WorkflowProgress from '../components/WorkflowProgress'
 import ApprovalModal from '../components/ApprovalModal'
+import CreateBranchModal from '../components/CreateBranchModal'
 
 function statusBadge(status) {
   const map = {
@@ -116,12 +117,58 @@ export default function TaskDetail() {
     }
   }
 
-  const handleApproval = async (approved, feedback) => {
+  const handleApproval = async (approved, feedback, gate) => {
     setActionLoading(true)
     setPolling(true)
     setError('')
     try {
-      const w = await api.resumeWorkflow(id, { approved, feedback })
+      const w = await api.resumeWorkflow(id, {
+        approved,
+        feedback,
+        gate,
+      })
+      setWorkflow(w)
+      if (w.status === 'completed') {
+        setPolling(false)
+        await loadTask()
+      }
+    } catch (err) {
+      setError(err.message)
+      setPolling(false)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleBranchCreate = async (branchName) => {
+    setActionLoading(true)
+    setPolling(true)
+    setError('')
+    try {
+      const w = await api.resumeWorkflow(id, {
+        gate: 'create_branch',
+        action: 'create',
+        branch_name: branchName,
+      })
+      setWorkflow(w)
+      if (w.status === 'completed') {
+        setPolling(false)
+        await loadTask()
+      }
+    } catch (err) {
+      setError(err.message)
+      setPolling(false)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleBranchSkip = async () => {
+    setActionLoading(true)
+    setPolling(true)
+    setError('')
+    try {
+      const w = await api.resumeWorkflow(id, { gate: 'create_branch', action: 'skip' })
       setWorkflow(w)
       if (w.status === 'completed') {
         setPolling(false)
@@ -157,8 +204,16 @@ export default function TaskDetail() {
   return (
     <div>
       <ApprovalModal
-        approval={workflow?.waiting_approval}
+        approval={workflow?.waiting_approval?.gate?.startsWith('approval')
+          ? workflow.waiting_approval
+          : null}
         onDecide={handleApproval}
+        loading={actionLoading}
+      />
+      <CreateBranchModal
+        approval={workflow?.waiting_approval?.gate === 'create_branch' ? workflow.waiting_approval : null}
+        onCreate={handleBranchCreate}
+        onSkip={handleBranchSkip}
         loading={actionLoading}
       />
 
@@ -249,6 +304,13 @@ export default function TaskDetail() {
                 {workflow.test_results.passed}/{workflow.test_results.total} passed
               </p>
               <p className="mt-1 text-xs text-gray-500">{workflow.test_results.output}</p>
+            </div>
+          )}
+          {workflow?.git_branch?.success && (
+            <div className="card">
+              <h3 className="mb-3 font-semibold">Git Branch</h3>
+              <p className="text-sm text-green-400">{workflow.git_branch.branch_name}</p>
+              <p className="mt-1 text-xs text-gray-500">{workflow.git_branch.message}</p>
             </div>
           )}
           {workflow?.staging_deploy && (

@@ -73,22 +73,39 @@ async def create_workflow_run(db: AsyncSession, task: Task, user_id: int) -> Wor
     return run
 
 
+def _is_pause_node(node_name: str) -> bool:
+    return "approval" in node_name or node_name == "create_branch"
+
+
+def _has_interrupt(snapshot) -> bool:
+    if not snapshot.tasks:
+        return False
+    return any(task.interrupts for task in snapshot.tasks)
+
+
 async def _stream_until_pause(db: AsyncSession, run: WorkflowRun, config: dict) -> None:
+    """Run automated steps until the graph hits a real interrupt."""
     graph = build_workflow()
     while True:
         snapshot = await graph.aget_state(config)
+        if _has_interrupt(snapshot):
+            await _sync_run_from_graph(db, run)
+            return
         if not snapshot.next:
             await _sync_run_from_graph(db, run)
-            break
-        if any("approval" in n for n in snapshot.next):
-            await _sync_run_from_graph(db, run)
-            break
+            return
+
         async for _ in graph.astream(None, config=config, stream_mode="values"):
             await _sync_run_from_graph(db, run)
+            snapshot = await graph.aget_state(config)
+            if _has_interrupt(snapshot):
+                await _sync_run_from_graph(db, run)
+                return
+
         snapshot = await graph.aget_state(config)
-        if not snapshot.next or any("approval" in n for n in snapshot.next):
+        if _has_interrupt(snapshot) or not snapshot.next:
             await _sync_run_from_graph(db, run)
-            break
+            return
 
 
 async def execute_workflow_start(db: AsyncSession, run: WorkflowRun, requirement: dict) -> None:
@@ -117,18 +134,43 @@ async def execute_workflow_resume(
     *,
     approved: bool,
     feedback: str = "",
+    action: str | None = None,
+    branch_name: str = "",
+    gate: str | None = None,
 ) -> None:
     graph = build_workflow()
     config = _config(run.thread_id)
-    decision = {"approved": approved, "feedback": feedback}
+    is_branch_resume = action in ("create", "skip")
+    if is_branch_resume:
+        decision = {"gate": "create_branch", "action": action}
+        if branch_name:
+            decision["branch_name"] = branch_name
+    else:
+        decision = {
+            "gate": gate or "",
+            "approved": approved,
+            "feedback": feedback,
+        }
 
     run.status = WorkflowStatus.RUNNING
     await db.commit()
 
     try:
-        await graph.ainvoke(Command(resume=decision), config=config)
+        async for _ in graph.astream(Command(resume=decision), config=config, stream_mode="values"):
+            await _sync_run_from_graph(db, run)
+            # Branch resume must not continue into deploy/smoke/approval in the same
+            # Command — that would feed the branch payload into approval_staging.
+            if is_branch_resume:
+                snapshot = await graph.aget_state(config)
+                statuses = dict((snapshot.values or {}).get("step_statuses") or {})
+                if statuses.get("create_branch") == "completed":
+                    break
+
         await _sync_run_from_graph(db, run)
-        await _stream_until_pause(db, run, config)
+
+        snapshot = await graph.aget_state(config)
+        if not _has_interrupt(snapshot):
+            await _stream_until_pause(db, run, config)
     except Exception:
         logger.exception("Workflow resume failed for run %s", run.id)
         run.status = WorkflowStatus.FAILED
@@ -161,12 +203,28 @@ async def start_workflow_background(run_id: int, requirement: dict) -> None:
         await execute_workflow_start(db, run, requirement)
 
 
-async def resume_workflow_background(run_id: int, *, approved: bool, feedback: str = "") -> None:
+async def resume_workflow_background(
+    run_id: int,
+    *,
+    approved: bool,
+    feedback: str = "",
+    action: str | None = None,
+    branch_name: str = "",
+    gate: str | None = None,
+) -> None:
     async with async_session() as db:
         run = await db.get(WorkflowRun, run_id)
         if not run:
             return
-        await execute_workflow_resume(db, run, approved=approved, feedback=feedback)
+        await execute_workflow_resume(
+            db,
+            run,
+            approved=approved,
+            feedback=feedback,
+            action=action,
+            branch_name=branch_name,
+            gate=gate,
+        )
 
 
 async def resume_workflow(
@@ -175,8 +233,19 @@ async def resume_workflow(
     *,
     approved: bool,
     feedback: str = "",
+    action: str | None = None,
+    branch_name: str = "",
+    gate: str | None = None,
 ) -> WorkflowRun:
-    await execute_workflow_resume(db, run, approved=approved, feedback=feedback)
+    await execute_workflow_resume(
+        db,
+        run,
+        approved=approved,
+        feedback=feedback,
+        action=action,
+        branch_name=branch_name,
+        gate=gate,
+    )
     await db.refresh(run)
     return run
 
@@ -194,6 +263,8 @@ async def _sync_run_from_graph(db: AsyncSession, run: WorkflowRun) -> None:
                 break
     if pending_approval:
         values["pending_approval"] = pending_approval
+    else:
+        values.pop("pending_approval", None)
 
     run.state_json = _serialize_state(values)
     run.current_step = values.get("current_step", run.current_step)
@@ -211,7 +282,7 @@ async def _sync_run_from_graph(db: AsyncSession, run: WorkflowRun) -> None:
         task = await db.get(Task, run.task_id)
         if task:
             task.status = TaskStatus.COMPLETED
-    elif snapshot.next and any("approval" in n for n in snapshot.next):
+    elif _has_interrupt(snapshot):
         run.status = WorkflowStatus.WAITING_APPROVAL
     elif snapshot.next:
         run.status = WorkflowStatus.RUNNING
@@ -259,6 +330,7 @@ def build_workflow_response(run: WorkflowRun) -> dict[str, Any]:
         "code_artifacts": state.get("code_artifacts"),
         "test_cases": state.get("test_cases"),
         "test_results": state.get("test_results"),
+        "git_branch": state.get("git_branch"),
         "staging_deploy": state.get("staging_deploy"),
         "staging_smoke": state.get("staging_smoke"),
         "production_deploy": state.get("production_deploy"),

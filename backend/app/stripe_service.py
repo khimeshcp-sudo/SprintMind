@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import stripe
+
+logger = logging.getLogger(__name__)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -80,21 +83,26 @@ async def sync_stripe_catalog(db: AsyncSession) -> None:
     if not _stripe_configured():
         return
 
-    result = await db.execute(
-        select(SubscriptionPlan).where(
-            SubscriptionPlan.is_active.is_(True),
-            SubscriptionPlan.price_monthly > 0,
+    try:
+        result = await db.execute(
+            select(SubscriptionPlan).where(
+                SubscriptionPlan.is_active.is_(True),
+                SubscriptionPlan.price_monthly > 0,
+            )
         )
-    )
-    plans = result.scalars().all()
-    changed = False
-    for plan in plans:
-        before = plan.stripe_price_id
-        await ensure_plan_stripe_price(db, plan)
-        if plan.stripe_price_id != before:
-            changed = True
-    if changed:
-        await db.commit()
+        plans = result.scalars().all()
+        changed = False
+        for plan in plans:
+            before = plan.stripe_price_id
+            await ensure_plan_stripe_price(db, plan)
+            if plan.stripe_price_id != before:
+                changed = True
+        if changed:
+            await db.commit()
+    except stripe.error.AuthenticationError:
+        logger.warning("Stripe catalog sync skipped: invalid API key")
+    except stripe.error.StripeError as exc:
+        logger.warning("Stripe catalog sync failed: %s", exc)
 
 
 def _ts_to_dt(ts: int | None) -> datetime | None:
