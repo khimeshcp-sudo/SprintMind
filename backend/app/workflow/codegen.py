@@ -1,13 +1,27 @@
-"""Dynamic code/test file generation and safe workspace writes."""
+"""LLM-driven code generation and safe workspace writes."""
 
 from __future__ import annotations
 
 import json
+import logging
 import re
 from pathlib import Path
 
 from app.config import settings
-from app.workflow.llm import parse_json_from_llm
+from app.workflow.agent_prompts import CODE_SYSTEM
+from app.workflow.llm import generate_for_codegen, parse_json_from_llm
+
+logger = logging.getLogger(__name__)
+
+_MANIFEST_SYSTEM = """You are a Magento 2 architect.
+Read the approved plan and list every file that must be written.
+Return ONLY JSON: {"files": [{"path": "app/code/...", "type": "backend|frontend|config", "purpose": "what to implement"}]}
+Include ALL files the plan requires — not just registration.php and module.xml."""
+
+_SINGLE_FILE_SYSTEM = """You are a Magento 2 developer.
+Write ONE complete production-ready file for the path and purpose given.
+Return ONLY JSON: {"path": "same path", "type": "backend|frontend|config", "content": "full file source"}
+No placeholders. Implement the approved plan."""
 
 
 def _slug(text: str) -> str:
@@ -59,6 +73,7 @@ def write_files(workspace: Path, files: list[dict]) -> list[dict]:
             "path": str(target),
             "relative_path": rel,
             "type": item.get("type", "code"),
+            "content": content,
             "preview": content[:500] + ("…" if len(content) > 500 else ""),
         })
     return artifacts
@@ -69,91 +84,113 @@ def parse_files_from_llm(raw: str) -> list[dict]:
         data = parse_json_from_llm(raw)
     except Exception:
         return []
+    files: list[dict] = []
     if isinstance(data, dict):
-        return data.get("files") or data.get("test_files") or []
-    if isinstance(data, list):
-        return data
-    return []
+        files = data.get("files") or data.get("test_files") or []
+    elif isinstance(data, list):
+        files = data
+    return _normalize_files(files)
 
 
-def fallback_code_files(requirement: dict, plan: dict) -> list[dict]:
-    """Requirement-driven fallback when LLM is unavailable."""
-    title = plan.get("title") or requirement.get("title") or "Feature"
-    desc = plan.get("summary") or requirement.get("description") or title
-    module = _module_name(requirement, plan)
-    vendor, name = module.split("_", 1) if "_" in module else ("SprintMind", _slug(title))
+def _normalize_files(files: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        path = (item.get("path") or item.get("relative_path") or "").strip()
+        content = item.get("content") or ""
+        if path and str(content).strip():
+            out.append({
+                "path": path,
+                "type": item.get("type", "code"),
+                "content": str(content),
+            })
+    return out
 
-    backend_tasks = plan.get("backend_tasks") or []
-    frontend_tasks = plan.get("frontend_tasks") or []
-    backend_comment = "\n * ".join(backend_tasks[:5]) if backend_tasks else desc
-    frontend_comment = "\n * ".join(frontend_tasks[:5]) if frontend_tasks else desc
 
-    files = [
-        {
-            "path": f"app/code/{vendor}/{name}/registration.php",
-            "type": "backend",
-            "content": f"""<?php
-/**
- * Auto-generated for: {title}
- * {desc}
- */
-use Magento\\Framework\\Component\\ComponentRegistrar;
-ComponentRegistrar::register(ComponentRegistrar::MODULE, '{module}', __DIR__);
-""",
-        },
-        {
-            "path": f"app/code/{vendor}/{name}/etc/module.xml",
-            "type": "backend",
-            "content": f"""<?xml version="1.0"?>
-<!-- Backend tasks:
- * {backend_comment}
--->
-<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-        xsi:noNamespaceSchemaLocation="urn:magento:framework:Module/etc/module.xsd">
-    <module name="{module}"/>
-</config>
-""",
-        },
-        {
-            "path": f"app/code/{vendor}/{name}/README.md",
-            "type": "docs",
-            "content": f"# {title}\n\n{desc}\n\n## Backend\n" + "\n".join(f"- {t}" for t in backend_tasks)
-            + "\n\n## Frontend\n" + "\n".join(f"- {t}" for t in frontend_tasks),
-        },
-    ]
+def build_code_user_message(
+    requirement: dict,
+    plan: dict,
+    *,
+    repo: dict | None = None,
+    feedback: str = "",
+) -> str:
+    """Plain-text prompt: requirement + approved plan → LLM writes code."""
+    lines = ["# Task Requirement"]
+    if requirement.get("jira_key"):
+        lines.append(f"Jira: {requirement['jira_key']}")
+    if requirement.get("title"):
+        lines.append(f"Title: {requirement['title']}")
+    if requirement.get("description"):
+        lines.append(f"\nDescription:\n{requirement['description']}")
 
-    if frontend_tasks or "layout" in desc.lower() or "frontend" in desc.lower():
-        layout_name = re.sub(r"[^a-z0-9_]+", "_", title.lower())[:40]
-        files.append({
-            "path": f"app/design/frontend/{vendor}/default/Magento_Cms/layout/cms_index_index.xml",
-            "type": "frontend",
-            "content": f"""<?xml version="1.0"?>
-<!-- Frontend tasks:
- * {frontend_comment}
--->
-<page xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-      xsi:noNamespaceSchemaLocation="urn:magento:framework:View/Layout/etc/page_configuration.xsd">
-    <body>
-        <referenceContainer name="content">
-            <block class="Magento\\Framework\\View\\Element\\Template"
-                   name="sprintmind.{layout_name}"
-                   template="{vendor}_{name}::{layout_name}.phtml"/>
-        </referenceContainer>
-    </body>
-</page>
-""",
-        })
-        files.append({
-            "path": f"app/code/{vendor}/{name}/view/frontend/templates/{layout_name}.phtml",
-            "type": "frontend",
-            "content": f"""<?php /** @var \\Magento\\Framework\\View\\Element\\Template $block */ ?>
-<div class="sprintmind-{layout_name}" data-feature="{title}">
-    <p><?= $block->escapeHtml(__('{desc}')) ?></p>
-</div>
-""",
-        })
+    plan_text = plan.get("content") or plan.get("summary") or ""
+    lines.append("\n# Approved Implementation Plan")
+    lines.append(plan_text)
 
-    return files
+    if repo and repo.get("available"):
+        lines.append("\n# Existing Magento Project")
+        lines.append(repo.get("summary") or json.dumps(repo.get("architecture", {}), indent=2))
+
+    if feedback.strip():
+        lines.append("\n# Revision Feedback (address every point)")
+        lines.append(feedback.strip())
+
+    lines.append("\nWrite all Magento files needed to implement the approved plan.")
+    return "\n".join(lines)
+
+
+async def generate_code_files(
+    requirement: dict,
+    plan: dict,
+    *,
+    repo: dict | None = None,
+    feedback: str = "",
+) -> list[dict]:
+    """LLM generates all code files from the approved plan — no static templates."""
+    user_message = build_code_user_message(requirement, plan, repo=repo, feedback=feedback)
+
+    raw = await generate_for_codegen(CODE_SYSTEM, user_message)
+    if raw:
+        files = parse_files_from_llm(raw)
+        if files:
+            return files
+
+    # Bulk JSON failed — ask LLM for file list, then generate each file separately
+    manifest_user = user_message + "\n\nList every file path to create (do not write content yet)."
+    manifest_raw = await generate_for_codegen(_MANIFEST_SYSTEM, manifest_user)
+    if not manifest_raw:
+        return []
+
+    manifest = parse_files_from_llm(manifest_raw)
+    if not manifest:
+        return []
+
+    generated: list[dict] = []
+    for entry in manifest:
+        path = entry.get("path", "").strip()
+        purpose = entry.get("purpose") or entry.get("content") or "implement per plan"
+        if not path:
+            continue
+        file_user = (
+            f"{user_message}\n\n"
+            f"Write this file only:\nPath: {path}\nPurpose: {purpose}"
+        )
+        file_raw = await generate_for_codegen(_SINGLE_FILE_SYSTEM, file_user)
+        if not file_raw:
+            continue
+        try:
+            data = parse_json_from_llm(file_raw)
+            if isinstance(data, dict) and data.get("content"):
+                generated.append({
+                    "path": data.get("path") or path,
+                    "type": data.get("type", entry.get("type", "code")),
+                    "content": data["content"],
+                })
+        except Exception as exc:
+            logger.warning("Failed to parse file %s: %s", path, exc)
+
+    return generated
 
 
 def fallback_test_files(requirement: dict, plan: dict, test_cases: list[dict]) -> list[dict]:

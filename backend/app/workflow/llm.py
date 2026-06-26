@@ -266,12 +266,7 @@ def _fallback_test_cases(user: str) -> str:
 
 
 def _fallback_code_files_json(user: str) -> str:
-    from app.workflow.codegen import fallback_code_files
-
-    data = _parse_user_json(user)
-    req = data.get("requirement") or data
-    plan = data.get("plan") or data
-    return json.dumps({"files": fallback_code_files(req, plan)}, indent=2)
+    return json.dumps({"files": [], "error": "LLM unavailable — configure GROQ_API_KEY"})
 
 
 def _fallback_test_files_json(user: str) -> str:
@@ -300,8 +295,81 @@ def _extract_field(text: str, field: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _extract_json_blob(text: str) -> str:
+    text = text.strip()
+    fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if fence:
+        text = fence.group(1).strip()
+
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = text.find(opener)
+        if start == -1:
+            continue
+        depth = 0
+        in_string = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    return text[start : idx + 1]
+    return text
+
+
 def parse_json_from_llm(text: str) -> dict | list:
-    match = re.search(r"(\{.*\}|\[.*\])", text, re.DOTALL)
-    if not match:
-        return {}
-    return json.loads(match.group())
+    blob = _extract_json_blob(text)
+    try:
+        return json.loads(blob)
+    except json.JSONDecodeError:
+        match = re.search(r"(\{.*\}|\[.*\])", blob, re.DOTALL)
+        if not match:
+            return {}
+        return json.loads(match.group())
+
+
+async def generate_for_codegen(system: str, user: str) -> str | None:
+    """Call LLM for code generation. Prefers Groq. Returns None if all providers fail."""
+    timeout = settings.llm_timeout_seconds
+    providers: list[tuple[str, Callable[..., object]]] = []
+
+    if settings.groq_api_key:
+        providers.append(("groq", _groq_generate))
+    provider = (settings.llm_provider or "ollama").lower().strip()
+    if provider == "groq" and settings.groq_api_key:
+        pass  # already first
+    elif provider == "openai" and settings.openai_api_key:
+        providers.append(("openai", _openai_generate))
+    elif provider == "gemini" and settings.gemini_api_key:
+        providers.append(("gemini", _gemini_generate))
+    elif provider == "ollama" and settings.ollama_enabled:
+        providers.append(("ollama", _ollama_generate))
+
+    for name, fn in providers:
+        try:
+            response = await fn(system, user, timeout=timeout)
+            _log_llm_exchange(
+                provider=name,
+                system=_preview(system),
+                user=_preview(user),
+                response=_preview(response),
+                extra="codegen",
+            )
+            return response
+        except Exception as exc:
+            logger.warning("codegen %s failed: %s", name, exc)
+
+    return None

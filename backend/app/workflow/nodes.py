@@ -11,9 +11,9 @@ from langgraph.types import interrupt
 
 from app.config import settings
 from app.workflow.codegen import (
-    fallback_code_files,
     fallback_smoke_checks,
     fallback_test_files,
+    generate_code_files,
     parse_files_from_llm,
     resolve_workspace,
     write_files,
@@ -163,46 +163,24 @@ async def write_code_node(state: WorkflowGraphState) -> dict:
     repo = state.get("repo_analysis") or {}
 
     git_result = dict(state.get("git_branch") or {})
-    if not git_result.get("success"):
-        git_result = ensure_git_branch(req, branch_strategy=repo.get("branch_strategy"))
-
-    # Log git branch result but allow proceeding with code generation
-    # (files can still be written to workspace even if git branch setup has issues)
     if not git_result.get("success") and not git_result.get("skipped"):
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning(f"Git branch setup warning: {git_result.get('error', 'unknown error')}")
+        git_result = ensure_git_branch(req, branch_strategy=repo.get("branch_strategy"))
 
     workspace = resolve_workspace(task_id)
 
-    system = (
-        "You are a Magento 2 developer. Generate production-ready code from the requirement and plan. "
-        "Return ONLY valid JSON: {\"files\": [{\"path\": \"relative/path\", \"type\": \"backend|frontend|config\", "
-        "\"content\": \"full file content\"}]}. "
-        "Paths must be under app/code/, app/design/, or view/. Include registration.php and module.xml when "
-        "creating a module. Escape newlines in content properly for JSON."
-    )
-    user_payload = {
-        "requirement": req,
-        "plan": plan,
-        "plan_text": plan.get("content") or plan.get("summary") or "",
-    }
-    if feedback:
-        user_payload["revision_feedback"] = feedback
-
-    raw = await generate(system, json.dumps(user_payload, indent=2))
-    files = parse_files_from_llm(raw)
-    if not files:
-        files = fallback_code_files(req, plan)
-
+    files = await generate_code_files(req, plan, repo=repo, feedback=feedback)
     artifacts = write_files(workspace, files)
+
     statuses = dict(state.get("step_statuses") or {})
-    statuses["write_code"] = "completed"
+    statuses["write_code"] = "completed" if artifacts else "failed"
     return {
         "code_artifacts": artifacts,
         "git_branch": git_result,
         "step_statuses": statuses,
         "current_step": "approval_code",
+        "errors": [] if artifacts else [
+            "LLM did not generate code — check GROQ_API_KEY and LLM_PROVIDER=groq in .env",
+        ],
     }
 
 
