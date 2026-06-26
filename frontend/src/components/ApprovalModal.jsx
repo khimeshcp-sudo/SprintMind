@@ -8,9 +8,13 @@ export default function ApprovalModal({ approval, onDecide, loading }) {
   if (!approval) return null
 
   const { title, message, data, gate } = approval
-  const display = gate === 'approval_plan' ? formatPlanContent(data) : (
-    typeof data === 'string' ? data : JSON.stringify(data, null, 2)
-  )
+  const display = gate === 'approval_plan'
+    ? formatPlanContent(data)
+    : gate === 'merge_code'
+    ? `Branch: ${data?.branch || 'unknown'}\nMerge Request: ${data?.merge_request_url || 'not created yet'}`
+    : typeof data === 'string'
+    ? data
+    : JSON.stringify(data, null, 2)
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">

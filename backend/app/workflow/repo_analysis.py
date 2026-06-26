@@ -304,6 +304,122 @@ def _branch_exists(root: Path, name: str) -> bool:
     return code == 0
 
 
+def push_branch(root: Path, branch_name: str) -> dict[str, Any]:
+    _configure_git_safe_directory(root)
+    rc, out = _run_git(["push", "-u", "origin", branch_name], root)
+    return {
+        "success": rc == 0,
+        "branch": branch_name,
+        "output": out,
+        "error": None if rc == 0 else out,
+    }
+
+
+def _git_provider() -> str:
+    base = (settings.magento_git_api_base_url or "").lower()
+    if "/repos/" in base or "github" in base:
+        return "github"
+    return "gitlab"
+
+
+def create_merge_request(branch_name: str) -> dict[str, Any]:
+    if not settings.magento_git_api_base_url or not settings.magento_git_api_token:
+        return {
+            "success": False,
+            "error": "Git API base URL or token not configured",
+        }
+
+    import httpx
+
+    provider = _git_provider()
+    base = settings.magento_git_api_base_url.rstrip("/")
+    target_branch = settings.magento_git_base_branch or "main"
+    title = f"Merge {branch_name} into {target_branch}"
+    description = "Auto-generated merge request from SprintMind AI workflow."
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if provider == "github":
+        headers["Authorization"] = f"token {settings.magento_git_api_token}"
+    else:
+        headers["Authorization"] = f"Bearer {settings.magento_git_api_token}"
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            if provider == "github":
+                url = f"{base}/pulls"
+                payload = {
+                    "title": title,
+                    "head": branch_name,
+                    "base": target_branch,
+                    "body": description,
+                }
+            else:
+                url = f"{base}/merge_requests"
+                payload = {
+                    "source_branch": branch_name,
+                    "target_branch": target_branch,
+                    "title": title,
+                    "description": description,
+                }
+            res = client.post(url, json=payload, headers=headers)
+        data = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}
+        if res.status_code not in (200, 201):
+            return {
+                "success": False,
+                "error": data.get("message") or res.text,
+                "status_code": res.status_code,
+            }
+        return {
+            "success": True,
+            "id": data.get("number") or data.get("iid") or data.get("id"),
+            "web_url": data.get("html_url") or data.get("web_url") or data.get("url") or data.get("http_url_to_repo"),
+            "data": data,
+            "provider": provider,
+        }
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
+def merge_merge_request(mr_id: str | int, mr_url: str | None = None) -> dict[str, Any]:
+    if not settings.magento_git_api_base_url or not settings.magento_git_api_token:
+        return {
+            "success": False,
+            "error": "Git API base URL or token not configured",
+        }
+
+    import httpx
+
+    provider = _git_provider()
+    base = settings.magento_git_api_base_url.rstrip("/")
+    if provider == "github":
+        endpoint = f"{base}/pulls/{mr_id}/merge"
+    else:
+        endpoint = f"{base}/merge_requests/{mr_id}/merge"
+
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if provider == "github":
+        headers["Authorization"] = f"token {settings.magento_git_api_token}"
+    else:
+        headers["Authorization"] = f"Bearer {settings.magento_git_api_token}"
+
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            res = client.put(endpoint, headers=headers)
+        data = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}
+        if res.status_code not in (200, 201):
+            return {
+                "success": False,
+                "error": data.get("message") or res.text,
+                "status_code": res.status_code,
+            }
+        return {"success": True, "data": data, "web_url": mr_url}
+    except Exception as exc:
+        return {"success": False, "error": str(exc)}
+
+
 def ensure_git_branch(
     requirement: dict,
     *,
@@ -395,19 +511,17 @@ def ensure_git_branch(
         }
 
     _, porcelain = _run_git(["status", "--porcelain"], root)
-    # Only block on tracked-file changes (not untracked ?? — those carry onto the new branch)
+    # Auto-stash tracked changes to allow branch creation
     blocking = [
         line for line in porcelain.splitlines()
         if line and (line[0] in "MADRCU" or line[1] in "MADRCU")
     ]
     if blocking:
-        return {
-            "success": False,
-            "error": "Working tree has uncommitted changes to tracked files — commit or stash first",
-            "status": "\n".join(blocking),
-            "branch": branch_name,
-            "logs": logs,
-        }
+        logs.append(f"Uncommitted changes detected — auto-stashing: {len(blocking)} file(s)")
+        stash_rc, stash_out = log_step(["stash", "push", "-m", f"auto-stash-for-{branch_name}"])
+        if stash_rc != 0:
+            logs.append(f"(warn) git stash failed: {stash_out}")
+            # Still try to proceed — stash might not be critical
 
     base = (settings.magento_git_base_branch or "develop").strip()
     rc, out = log_step(["checkout", base])

@@ -114,7 +114,9 @@ async def workflow_resume(
     if run.status == WorkflowStatus.CANCELLED:
         raise HTTPException(status_code=400, detail="Workflow was stopped")
     if run.status != WorkflowStatus.WAITING_APPROVAL:
-        raise HTTPException(status_code=400, detail="Workflow is not waiting for approval")
+        state = dict(run.state_json or {})
+        if not state.get("pending_approval"):
+            raise HTTPException(status_code=400, detail="Workflow is not waiting for approval")
 
     run.status = WorkflowStatus.RUNNING
     state = dict(run.state_json or {})

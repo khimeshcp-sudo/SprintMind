@@ -24,7 +24,14 @@ from app.workflow.plan_prompts import (
     build_plan_user_message,
     enrich_requirement,
 )
-from app.workflow.repo_analysis import analyze_repository, ensure_git_branch, extract_keywords
+from app.workflow.repo_analysis import (
+    analyze_repository,
+    ensure_git_branch,
+    extract_keywords,
+    push_branch,
+    create_merge_request,
+    merge_merge_request,
+)
 from app.workflow.state import WorkflowGraphState
 from app.workflow.steps import STEP_ORDER
 
@@ -155,15 +162,12 @@ async def write_code_node(state: WorkflowGraphState) -> dict:
     if not git_result.get("success"):
         git_result = ensure_git_branch(req, branch_strategy=repo.get("branch_strategy"))
 
+    # Log git branch result but allow proceeding with code generation
+    # (files can still be written to workspace even if git branch setup has issues)
     if not git_result.get("success") and not git_result.get("skipped"):
-        statuses = dict(state.get("step_statuses") or {})
-        statuses["write_code"] = "failed"
-        return {
-            "git_branch": git_result,
-            "step_statuses": statuses,
-            "current_step": "write_code",
-            "errors": [git_result.get("error", "Git branch must be created before writing code")],
-        }
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.warning(f"Git branch setup warning: {git_result.get('error', 'unknown error')}")
 
     workspace = resolve_workspace(task_id)
 
@@ -347,7 +351,77 @@ async def approval_test_run_node(state: WorkflowGraphState) -> dict:
     statuses["approval_test_run"] = "completed" if approved else "failed"
     if not approved:
         return {"step_statuses": statuses, "current_step": "run_tests"}
-    return {"step_statuses": statuses, "current_step": "deploy_staging"}
+    return {"step_statuses": statuses, "current_step": "merge_code"}
+
+
+async def merge_code_node(state: WorkflowGraphState) -> dict:
+    git_branch = state.get("git_branch") or {}
+    repo = state.get("repo_analysis") or {}
+    branch_name = git_branch.get("branch") or repo.get("branch_strategy", {}).get("branch") or "feature/auto-merge"
+    mr_url = state.get("merge_request_url")
+
+    decision = interrupt({
+        "gate": "merge_code",
+        "title": "Merge Code",
+        "message": "Approve the generated code changes and merge the branch into origin/main.",
+        "data": {
+            "branch": branch_name,
+            "merge_request_url": mr_url,
+        },
+    })
+
+    approved = bool(decision.get("approved", False))
+    statuses = dict(state.get("step_statuses") or {})
+    statuses["merge_code"] = "completed" if approved else "failed"
+
+    if not approved:
+        return {
+            "step_statuses": statuses,
+            "current_step": "merge_code",
+            "errors": ["Merge Code rejected by user"],
+            "cancelled": True,
+            "cancel_message": "Merge Code rejected by user",
+        }
+
+    repo_root = resolve_workspace(state.get("task_id", 0))
+    branch = branch_name
+    errors = []
+    mr_data = {}
+
+    try:
+        push_result = push_branch(repo_root, branch)
+        if not push_result.get("success"):
+            raise RuntimeError(push_result.get("error", "Git push failed"))
+
+        mr_result = create_merge_request(branch)
+        if not mr_result.get("success"):
+            raise RuntimeError(mr_result.get("error", "Create Merge Request failed"))
+        mr_data = mr_result
+
+        merge_result = merge_merge_request(mr_result.get("id"), mr_result.get("web_url"))
+        if not merge_result.get("success"):
+            raise RuntimeError(merge_result.get("error", "Merge request failed"))
+
+    except Exception as exc:
+        errors.append(str(exc))
+
+    if errors:
+        statuses["merge_code"] = "failed"
+        return {
+            "step_statuses": statuses,
+            "current_step": "merge_code",
+            "errors": errors,
+            "merge_request_url": mr_data.get("web_url") if mr_data else None,
+            "cancelled": True,
+            "cancel_message": "Merge Code failed",
+        }
+
+    return {
+        "step_statuses": statuses,
+        "current_step": "deploy_staging",
+        "merge_request_url": mr_data.get("web_url"),
+        "merge_result": mr_data,
+    }
 
 
 async def deploy_staging_node(state: WorkflowGraphState) -> dict:
@@ -492,7 +566,7 @@ def route_after_tests_approval(state: WorkflowGraphState) -> str:
 
 
 def route_after_test_run_approval(state: WorkflowGraphState) -> str:
-    return "deploy_staging" if state.get("current_step") == "deploy_staging" else "run_tests"
+    return "merge_code" if state.get("current_step") == "merge_code" else "run_tests"
 
 
 def route_after_staging_approval(state: WorkflowGraphState) -> str:

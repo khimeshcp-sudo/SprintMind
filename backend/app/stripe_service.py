@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 
 import stripe
@@ -12,6 +13,8 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models import SubscriptionPlan, SubscriptionStatus, User, UserSubscription
 from app.subscription_service import assign_free_plan, get_user_subscription
+
+logger = logging.getLogger(__name__)
 
 stripe.api_key = settings.effective_stripe_secret_key
 
@@ -88,13 +91,18 @@ async def sync_stripe_catalog(db: AsyncSession) -> None:
     )
     plans = result.scalars().all()
     changed = False
-    for plan in plans:
-        before = plan.stripe_price_id
-        await ensure_plan_stripe_price(db, plan)
-        if plan.stripe_price_id != before:
-            changed = True
-    if changed:
-        await db.commit()
+    try:
+        for plan in plans:
+            before = plan.stripe_price_id
+            await ensure_plan_stripe_price(db, plan)
+            if plan.stripe_price_id != before:
+                changed = True
+        if changed:
+            await db.commit()
+    except stripe.error.AuthenticationError:
+        logger.warning("Stripe catalog sync skipped: invalid API key")
+    except stripe.error.StripeError as exc:
+        logger.warning("Stripe catalog sync skipped: %s", exc)
 
 
 def _ts_to_dt(ts: int | None) -> datetime | None:

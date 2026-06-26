@@ -205,16 +205,7 @@ export default function TaskDetail() {
     workflow.status === 'failed' ||
     workflow.status === 'cancelled'
 
-  const approvalPayload =
-    workflow?.waiting_approval ||
-    (workflow?.status === 'waiting_approval' && workflow?.plan
-      ? {
-          gate: 'approval_plan',
-          title: 'Review Implementation Plan',
-          message: 'Review the AI-generated plan before code is written.',
-          data: workflow.plan,
-        }
-      : null)
+  const approvalPayload = workflow?.waiting_approval || null
 
   return (
     <div>
@@ -358,6 +349,19 @@ export default function TaskDetail() {
               <pre className="max-h-32 overflow-y-auto text-xs text-gray-400">
                 {workflow.production_deploy.log}
               </pre>
+            </div>
+          )}
+          {workflow?.merge_request_url && (
+            <div className="card">
+              <h3 className="mb-3 font-semibold">Merge Request</h3>
+              <a
+                href={workflow.merge_request_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-brand-300 hover:underline"
+              >
+                {workflow.merge_request_url}
+              </a>
             </div>
           )}
         </div>

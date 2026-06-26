@@ -35,6 +35,8 @@ class Settings(BaseSettings):
     magento_project_path: str = ""
     magento_git_base_branch: str = "develop"
     magento_git_create_branch: bool = True
+    magento_git_api_token: str = ""
+    magento_git_api_base_url: str = ""
 
     llm_debug: bool = True
     llm_debug_full: bool = True

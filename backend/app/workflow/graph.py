@@ -16,6 +16,7 @@ from app.workflow.nodes import (
     deploy_staging_node,
     generate_plan_node,
     generate_tests_node,
+    merge_code_node,
     parse_requirement_node,
     route_after_code_approval,
     route_after_plan_approval,
@@ -51,6 +52,7 @@ def build_workflow():
     g.add_node("approval_tests", approval_tests_node)
     g.add_node("run_tests", run_tests_node)
     g.add_node("approval_test_run", approval_test_run_node)
+    g.add_node("merge_code", merge_code_node)
     g.add_node("deploy_staging", deploy_staging_node)
     g.add_node("smoke_staging", smoke_staging_node)
     g.add_node("approval_staging", approval_staging_node)
@@ -77,9 +79,10 @@ def build_workflow():
     })
     g.add_edge("run_tests", "approval_test_run")
     g.add_conditional_edges("approval_test_run", route_after_test_run_approval, {
-        "deploy_staging": "deploy_staging",
+        "merge_code": "merge_code",
         "run_tests": "run_tests",
     })
+    g.add_edge("merge_code", "deploy_staging")
     g.add_edge("deploy_staging", "smoke_staging")
     g.add_edge("smoke_staging", "approval_staging")
     g.add_conditional_edges("approval_staging", route_after_staging_approval, {

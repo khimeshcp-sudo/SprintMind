@@ -22,6 +22,9 @@ class WorkflowGraphState(TypedDict, total=False):
     staging_smoke: dict
     production_deploy: dict
     production_smoke: dict
+    merge_request_id: str | int
+    merge_request_url: str
+    merge_result: dict
     current_step: str
     step_statuses: dict[str, str]
     waiting_approval: dict | None

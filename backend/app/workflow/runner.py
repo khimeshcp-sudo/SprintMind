@@ -83,7 +83,12 @@ async def _stream_until_pause(db: AsyncSession, run: WorkflowRun, config: dict) 
         if not snapshot.next:
             await _sync_run_from_graph(db, run)
             break
-        if any("approval" in n for n in snapshot.next):
+        # Check if any next node is an approval node or if pending_approval exists in state
+        is_approval_pause = (
+            any("approval" in n for n in snapshot.next) or
+            (snapshot.values and snapshot.values.get("pending_approval"))
+        )
+        if is_approval_pause:
             await _sync_run_from_graph(db, run)
             break
         async for _ in graph.astream(None, config=config, stream_mode="values"):
@@ -92,7 +97,12 @@ async def _stream_until_pause(db: AsyncSession, run: WorkflowRun, config: dict) 
                 return
             await _sync_run_from_graph(db, run)
         snapshot = await graph.aget_state(config)
-        if not snapshot.next or any("approval" in n for n in snapshot.next):
+        is_approval_pause = (
+            not snapshot.next or
+            any("approval" in n for n in snapshot.next) or
+            (snapshot.values and snapshot.values.get("pending_approval"))
+        )
+        if is_approval_pause:
             await _sync_run_from_graph(db, run)
             break
 
@@ -338,7 +348,7 @@ async def _sync_run_from_graph(db: AsyncSession, run: WorkflowRun) -> None:
         task = await db.get(Task, run.task_id)
         if task:
             task.status = TaskStatus.COMPLETED
-    elif snapshot.next and any("approval" in n for n in snapshot.next):
+    elif values.get("pending_approval") or (snapshot.next and any("approval" in n or "merge_code" == n for n in snapshot.next)):
         run.status = WorkflowStatus.WAITING_APPROVAL
     elif snapshot.next:
         run.status = WorkflowStatus.RUNNING
@@ -395,6 +405,8 @@ def build_workflow_response(run: WorkflowRun) -> dict[str, Any]:
         "staging_smoke": state.get("staging_smoke"),
         "production_deploy": state.get("production_deploy"),
         "production_smoke": state.get("production_smoke"),
+        "merge_request_url": state.get("merge_request_url"),
+        "merge_result": state.get("merge_result"),
         "requirement": state.get("requirement"),
         "repo_analysis": state.get("repo_analysis"),
         "git_branch": state.get("git_branch"),
