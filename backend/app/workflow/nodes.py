@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
@@ -26,14 +27,17 @@ from app.workflow.plan_prompts import (
 )
 from app.workflow.repo_analysis import (
     analyze_repository,
+    commit_changes,
+    create_merge_request,
     ensure_git_branch,
     extract_keywords,
-    push_branch,
-    create_merge_request,
     merge_merge_request,
+    push_branch,
 )
 from app.workflow.state import WorkflowGraphState
 from app.workflow.steps import STEP_ORDER
+
+logger = logging.getLogger(__name__)
 
 
 def _set_step(state: WorkflowGraphState, step: str, status: str = "running") -> dict:
@@ -363,7 +367,7 @@ async def merge_code_node(state: WorkflowGraphState) -> dict:
     decision = interrupt({
         "gate": "merge_code",
         "title": "Merge Code",
-        "message": "Approve the generated code changes and merge the branch into origin/main.",
+        "message": "Approve to commit generated changes, push the branch, and open a pull request to origin/main.",
         "data": {
             "branch": branch_name,
             "merge_request_url": mr_url,
@@ -383,44 +387,96 @@ async def merge_code_node(state: WorkflowGraphState) -> dict:
             "cancel_message": "Merge Code rejected by user",
         }
 
+    req = state.get("requirement") or {}
+    plan = state.get("plan") or {}
     repo_root = resolve_workspace(state.get("task_id", 0))
     branch = branch_name
-    errors = []
-    mr_data = {}
+    errors: list[str] = []
+    mr_data: dict = {}
+    merge_warnings: list[str] = []
+
+    artifacts = list(state.get("code_artifacts") or [])
+    test_files = (state.get("test_results") or {}).get("test_files") or []
+    relative_paths = [
+        p for p in (
+            *(a.get("relative_path") for a in artifacts),
+            *(a.get("relative_path") for a in test_files),
+        )
+        if p
+    ]
+
+    title = req.get("title") or plan.get("title") or "SprintMind workflow changes"
+    jira = req.get("jira_key")
+    commit_message = f"SprintMind: {title}"
+    if jira:
+        commit_message = f"{commit_message} ({jira})"
+    commit_message = f"{commit_message}\n\nAuto-committed from SprintMind AI workflow."
 
     try:
+        commit_result = commit_changes(
+            repo_root,
+            branch,
+            commit_message,
+            paths=relative_paths or None,
+        )
+        if not commit_result.get("success"):
+            raise RuntimeError(commit_result.get("error", "Git commit failed"))
+
         push_result = push_branch(repo_root, branch)
         if not push_result.get("success"):
             raise RuntimeError(push_result.get("error", "Git push failed"))
 
         mr_result = create_merge_request(branch)
         if not mr_result.get("success"):
-            raise RuntimeError(mr_result.get("error", "Create Merge Request failed"))
+            err = mr_result.get("error", "Pull request creation failed")
+            if "not found" in str(err).lower() or "no commits" in str(err).lower():
+                err = (
+                    f"{err}. Ensure the branch was pushed to GitHub before opening a pull request."
+                )
+            raise RuntimeError(err)
         mr_data = mr_result
 
         merge_result = merge_merge_request(mr_result.get("id"), mr_result.get("web_url"))
         if not merge_result.get("success"):
-            raise RuntimeError(merge_result.get("error", "Merge request failed"))
-
+            merge_warnings.append(merge_result.get("error", "Automatic merge not available"))
     except Exception as exc:
+        logger.exception("Merge Code failed for task %s", state.get("task_id"))
         errors.append(str(exc))
 
     if errors:
+        logger.error("Merge Code errors: %s", errors)
         statuses["merge_code"] = "failed"
         return {
             "step_statuses": statuses,
             "current_step": "merge_code",
             "errors": errors,
             "merge_request_url": mr_data.get("web_url") if mr_data else None,
+            "merge_result": mr_data or None,
             "cancelled": True,
-            "cancel_message": "Merge Code failed",
+            "cancel_message": f"Merge Code failed: {errors[0]}",
+        }
+
+    merge_result_payload = {
+        **mr_data,
+        "auto_merged": not merge_warnings,
+        "merge_warnings": merge_warnings,
+    }
+
+    if merge_warnings:
+        return {
+            "step_statuses": statuses,
+            "current_step": "merge_code",
+            "merge_request_url": mr_data.get("web_url"),
+            "merge_request_id": mr_data.get("id"),
+            "merge_result": merge_result_payload,
         }
 
     return {
         "step_statuses": statuses,
         "current_step": "deploy_staging",
         "merge_request_url": mr_data.get("web_url"),
-        "merge_result": mr_data,
+        "merge_request_id": mr_data.get("id"),
+        "merge_result": merge_result_payload,
     }
 
 
@@ -567,6 +623,14 @@ def route_after_tests_approval(state: WorkflowGraphState) -> str:
 
 def route_after_test_run_approval(state: WorkflowGraphState) -> str:
     return "merge_code" if state.get("current_step") == "merge_code" else "run_tests"
+
+
+def route_after_merge_code(state: WorkflowGraphState) -> str:
+    if state.get("cancelled"):
+        return "stopped"
+    if state.get("current_step") == "deploy_staging":
+        return "deploy_staging"
+    return "stopped"
 
 
 def route_after_staging_approval(state: WorkflowGraphState) -> str:

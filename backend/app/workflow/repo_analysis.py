@@ -57,6 +57,38 @@ def _configure_git_safe_directory(root: Path) -> None:
     _run(["git", "config", "--global", "--add", f"safe.directory={root.resolve()}"], root)
 
 
+def _configure_git_identity(root: Path) -> None:
+    """Set commit author for the repo (required in Docker where no global identity exists)."""
+    name = (settings.magento_git_user_name or "SprintMind Bot").strip()
+    email = (settings.magento_git_user_email or "sprintmind-bot@users.noreply.github.com").strip()
+    _run_git(["config", "user.name", name], root)
+    _run_git(["config", "user.email", email], root)
+    _run(
+        ["git", "config", "--global", "user.name", name],
+        root,
+    )
+    _run(
+        ["git", "config", "--global", "user.email", email],
+        root,
+    )
+
+
+def _git_identity_config_args() -> list[str]:
+    name = (settings.magento_git_user_name or "SprintMind Bot").strip()
+    email = (settings.magento_git_user_email or "sprintmind-bot@users.noreply.github.com").strip()
+    return ["-c", f"user.name={name}", "-c", f"user.email={email}"]
+
+
+def _run_git_commit(root: Path, message: str, timeout: int = 30) -> tuple[int, str]:
+    """Commit with explicit author — avoids failures when repo/global git identity is unset."""
+    safe = str(root.resolve())
+    return _run(
+        ["git", "-c", f"safe.directory={safe}", *_git_identity_config_args(), "commit", "-m", message],
+        root,
+        timeout,
+    )
+
+
 def resolve_project_root() -> Path | None:
     raw = (settings.magento_project_path or "").strip()
     if not raw:
@@ -304,14 +336,176 @@ def _branch_exists(root: Path, name: str) -> bool:
     return code == 0
 
 
+def _friendly_git_error(message: str) -> str:
+    text = (message or "").strip()
+    lower = text.lower()
+    if "author identity unknown" in lower or "tell me who you are" in lower:
+        return (
+            "Git commit author is not configured. Set MAGENTO_GIT_USER_NAME and "
+            "MAGENTO_GIT_USER_EMAIL in .env, then retry."
+        )
+    if "permission denied" in lower or "returned error: 403" in lower:
+        return (
+            "Git push denied: the configured GitHub token does not have write access to "
+            "this repository. Use a token from an account with push permission (repo scope) "
+            "or grant the token user write access to the repo."
+        )
+    if "could not read username" in lower:
+        return (
+            "Git push failed: remote requires authentication. Ensure MAGENTO_GIT_API_TOKEN "
+            "is set to a GitHub personal access token with repo scope."
+        )
+    return text
+
+
+def _api_error_message(data: dict | list | str, fallback: str = "") -> str:
+    if isinstance(data, str):
+        return data or fallback
+    if isinstance(data, list):
+        parts = []
+        for item in data:
+            if isinstance(item, dict):
+                parts.append(item.get("message") or str(item))
+            else:
+                parts.append(str(item))
+        return "; ".join(parts) or fallback
+    if isinstance(data, dict):
+        msg = data.get("message") or data.get("error")
+        if isinstance(msg, list):
+            return "; ".join(str(m) for m in msg)
+        if msg:
+            return str(msg)
+        if data.get("errors"):
+            return _api_error_message(data["errors"], fallback)
+    return fallback
+
+
+def commit_changes(
+    root: Path,
+    branch_name: str,
+    message: str,
+    *,
+    paths: list[str] | None = None,
+) -> dict[str, Any]:
+    """Stage and commit generated changes on the target branch."""
+    _configure_git_safe_directory(root)
+    _configure_git_identity(root)
+
+    code, _ = _run_git(["rev-parse", "--is-inside-work-tree"], root)
+    if code != 0:
+        return {"success": False, "error": f"Not a git repository: {root}"}
+
+    logs: list[str] = []
+
+    def log_step(args: list[str]) -> tuple[int, str]:
+        rc, out = _run_git(args, root)
+        logs.append(f"$ git {' '.join(args)}\n{out or '(no output)'}")
+        return rc, out
+
+    current = _current_branch(root)
+    if current != branch_name:
+        rc, out = log_step(["checkout", branch_name])
+        if rc != 0:
+            return {
+                "success": False,
+                "error": out or f"Failed to checkout branch {branch_name}",
+                "logs": logs,
+            }
+
+    if paths:
+        for rel in paths:
+            rel = rel.strip().lstrip("/")
+            if not rel:
+                continue
+            rc, out = log_step(["add", "--", rel])
+            if rc != 0:
+                return {
+                    "success": False,
+                    "error": out or f"Failed to stage {rel}",
+                    "logs": logs,
+                }
+    rc, out = log_step(["add", "-A"])
+    if rc != 0:
+        return {
+            "success": False,
+            "error": out or "Failed to stage changes",
+            "logs": logs,
+        }
+
+    _, porcelain = _run_git(["status", "--porcelain"], root)
+    if not porcelain.strip():
+        return {
+            "success": True,
+            "branch": branch_name,
+            "skipped": True,
+            "message": "No changes to commit",
+            "logs": logs,
+        }
+
+    rc, out = _run_git_commit(root, message)
+    logs.append(f"$ git commit -m {message!r}\n{out or '(no output)'}")
+    if rc != 0:
+        return {
+            "success": False,
+            "error": _friendly_git_error(out or "Git commit failed"),
+            "logs": logs,
+        }
+
+    return {
+        "success": True,
+        "branch": branch_name,
+        "message": message,
+        "output": out,
+        "logs": logs,
+    }
+
+
+def _remote_origin_url(root: Path) -> str:
+    _, out = _run_git(["remote", "get-url", "origin"], root)
+    return out.strip()
+
+
+def _with_git_token(remote_url: str) -> str | None:
+    """Return HTTPS remote URL with API token embedded for non-interactive push/pull."""
+    token = (settings.magento_git_api_token or "").strip()
+    if not token or not remote_url:
+        return None
+    if remote_url.startswith("git@"):
+        return None
+    if "://" in remote_url:
+        scheme, rest = remote_url.split("://", 1)
+        if "@" in rest.split("/")[0]:
+            return remote_url
+        provider = _git_provider()
+        user = "oauth2" if provider == "gitlab" else "x-access-token"
+        return f"{scheme}://{user}:{token}@{rest}"
+    return None
+
+
+def _run_git_authenticated(args: list[str], root: Path) -> tuple[int, str]:
+    """Run git using a temporary authenticated origin URL when a token is configured."""
+    remote_url = _remote_origin_url(root)
+    auth_url = _with_git_token(remote_url)
+    if not auth_url:
+        return _run_git(args, root)
+
+    rc_set, set_out = _run_git(["remote", "set-url", "origin", auth_url], root)
+    if rc_set != 0:
+        return rc_set, set_out or "Failed to configure authenticated git remote"
+    try:
+        return _run_git(args, root)
+    finally:
+        _run_git(["remote", "set-url", "origin", remote_url], root)
+
+
 def push_branch(root: Path, branch_name: str) -> dict[str, Any]:
     _configure_git_safe_directory(root)
-    rc, out = _run_git(["push", "-u", "origin", branch_name], root)
+    rc, out = _run_git_authenticated(["push", "-u", "origin", branch_name], root)
     return {
         "success": rc == 0,
         "branch": branch_name,
         "output": out,
-        "error": None if rc == 0 else out,
+        "error": None if rc == 0 else _friendly_git_error(out),
     }
 
 
@@ -365,9 +559,13 @@ def create_merge_request(branch_name: str) -> dict[str, Any]:
             res = client.post(url, json=payload, headers=headers)
         data = res.json() if res.headers.get("content-type", "").startswith("application/json") else {}
         if res.status_code not in (200, 201):
+            if provider == "github" and res.status_code == 422:
+                existing = _find_existing_github_pull(base, branch_name, target_branch, headers)
+                if existing:
+                    return existing
             return {
                 "success": False,
-                "error": data.get("message") or res.text,
+                "error": _api_error_message(data, res.text),
                 "status_code": res.status_code,
             }
         return {
@@ -379,6 +577,41 @@ def create_merge_request(branch_name: str) -> dict[str, Any]:
         }
     except Exception as exc:
         return {"success": False, "error": str(exc)}
+
+
+def _find_existing_github_pull(
+    base: str,
+    branch_name: str,
+    target_branch: str,
+    headers: dict[str, str],
+) -> dict[str, Any] | None:
+    import httpx
+
+    owner = base.rstrip("/").split("/repos/")[-1].split("/")[0] if "/repos/" in base else ""
+    head = f"{owner}:{branch_name}" if owner else branch_name
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            res = client.get(
+                f"{base}/pulls",
+                params={"head": head, "base": target_branch, "state": "open"},
+                headers=headers,
+            )
+        if res.status_code != 200:
+            return None
+        pulls = res.json()
+        if not pulls:
+            return None
+        pr = pulls[0]
+        return {
+            "success": True,
+            "id": pr.get("number"),
+            "web_url": pr.get("html_url"),
+            "data": pr,
+            "provider": "github",
+            "existing": True,
+        }
+    except Exception:
+        return None
 
 
 def merge_merge_request(mr_id: str | int, mr_url: str | None = None) -> dict[str, Any]:
@@ -412,12 +645,13 @@ def merge_merge_request(mr_id: str | int, mr_url: str | None = None) -> dict[str
         if res.status_code not in (200, 201):
             return {
                 "success": False,
-                "error": data.get("message") or res.text,
+                "error": _api_error_message(data, res.text),
                 "status_code": res.status_code,
+                "mergeable": False,
             }
-        return {"success": True, "data": data, "web_url": mr_url}
+        return {"success": True, "data": data, "web_url": mr_url, "merged": True}
     except Exception as exc:
-        return {"success": False, "error": str(exc)}
+        return {"success": False, "error": str(exc), "mergeable": False}
 
 
 def ensure_git_branch(
@@ -540,7 +774,8 @@ def ensure_git_branch(
             "logs": logs,
         }
 
-    pull_rc, pull_out = log_step(["pull", "--ff-only"])
+    pull_rc, pull_out = _run_git_authenticated(["pull", "--ff-only", "origin", base], root)
+    logs.append(f"$ git pull --ff-only origin {base}\n{pull_out or '(no output)'}")
     if pull_rc != 0:
         logs.append(f"(warn) git pull skipped or failed: {pull_out}")
 

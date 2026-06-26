@@ -13,7 +13,9 @@ COPY backend/app ./app
 COPY deploy ./deploy
 
 RUN mkdir -p /app/data/uploads /app/data/workspace \
-    && git config --global --add safe.directory /app/magento
+    && git config --global --add safe.directory /app/magento \
+    && git config --global user.name "SprintMind Bot" \
+    && git config --global user.email "sprintmind-bot@users.noreply.github.com"
 
 ENV MAGENTO_PROJECT_PATH=/app/magento
 ENV PYTHONUNBUFFERED=1

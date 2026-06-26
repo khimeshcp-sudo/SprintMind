@@ -19,6 +19,7 @@ from app.workflow.nodes import (
     merge_code_node,
     parse_requirement_node,
     route_after_code_approval,
+    route_after_merge_code,
     route_after_plan_approval,
     route_after_production_approval,
     route_after_staging_approval,
@@ -34,11 +35,13 @@ from app.workflow.steps import STEP_ORDER
 
 _checkpointer = MemorySaver()
 _compiled_graph = None
+_compiled_version: int | None = None
+_GRAPH_VERSION = 2
 
 
 def build_workflow():
-    global _compiled_graph
-    if _compiled_graph is not None:
+    global _compiled_graph, _compiled_version
+    if _compiled_graph is not None and _compiled_version == _GRAPH_VERSION:
         return _compiled_graph
 
     g = StateGraph(WorkflowGraphState)
@@ -82,7 +85,10 @@ def build_workflow():
         "merge_code": "merge_code",
         "run_tests": "run_tests",
     })
-    g.add_edge("merge_code", "deploy_staging")
+    g.add_conditional_edges("merge_code", route_after_merge_code, {
+        "deploy_staging": "deploy_staging",
+        "stopped": END,
+    })
     g.add_edge("deploy_staging", "smoke_staging")
     g.add_edge("smoke_staging", "approval_staging")
     g.add_conditional_edges("approval_staging", route_after_staging_approval, {
@@ -97,6 +103,7 @@ def build_workflow():
     })
 
     _compiled_graph = g.compile(checkpointer=_checkpointer)
+    _compiled_version = _GRAPH_VERSION
     return _compiled_graph
 
 

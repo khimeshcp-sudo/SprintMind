@@ -15,6 +15,7 @@ from app.workflow.runner import (
     refresh_workflow_run,
     restart_workflow,
     restart_workflow_background,
+    resume_workflow,
     resume_workflow_background,
     start_workflow_background,
     stop_workflow,
@@ -120,10 +121,20 @@ async def workflow_resume(
 
     run.status = WorkflowStatus.RUNNING
     state = dict(run.state_json or {})
+    pending_gate = (state.get("pending_approval") or {}).get("gate")
     state.pop("pending_approval", None)
     run.state_json = state
     await db.commit()
     await db.refresh(run)
+
+    if pending_gate == "merge_code":
+        run = await resume_workflow(
+            db,
+            run,
+            approved=body.approved,
+            feedback=body.feedback,
+        )
+        return build_workflow_response(run)
 
     background_tasks.add_task(
         resume_workflow_background,

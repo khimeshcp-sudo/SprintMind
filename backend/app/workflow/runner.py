@@ -84,11 +84,7 @@ async def _stream_until_pause(db: AsyncSession, run: WorkflowRun, config: dict) 
             await _sync_run_from_graph(db, run)
             break
         # Check if any next node is an approval node or if pending_approval exists in state
-        is_approval_pause = (
-            any("approval" in n for n in snapshot.next) or
-            (snapshot.values and snapshot.values.get("pending_approval"))
-        )
-        if is_approval_pause:
+        if _is_human_pause(snapshot):
             await _sync_run_from_graph(db, run)
             break
         async for _ in graph.astream(None, config=config, stream_mode="values"):
@@ -97,12 +93,7 @@ async def _stream_until_pause(db: AsyncSession, run: WorkflowRun, config: dict) 
                 return
             await _sync_run_from_graph(db, run)
         snapshot = await graph.aget_state(config)
-        is_approval_pause = (
-            not snapshot.next or
-            any("approval" in n for n in snapshot.next) or
-            (snapshot.values and snapshot.values.get("pending_approval"))
-        )
-        if is_approval_pause:
+        if _is_human_pause(snapshot):
             await _sync_run_from_graph(db, run)
             break
 
@@ -286,6 +277,14 @@ def _interrupt_payload(snapshot) -> dict | None:
     return None
 
 
+def _is_human_pause(snapshot) -> bool:
+    """True when the graph is waiting for user input (approval or merge code)."""
+    if _interrupt_payload(snapshot):
+        return True
+    nxt = snapshot.next or ()
+    return any("approval" in n for n in nxt) or "merge_code" in nxt
+
+
 def _plan_approval_payload(plan: dict | None) -> dict | None:
     if not plan:
         return None
@@ -348,7 +347,9 @@ async def _sync_run_from_graph(db: AsyncSession, run: WorkflowRun) -> None:
         task = await db.get(Task, run.task_id)
         if task:
             task.status = TaskStatus.COMPLETED
-    elif values.get("pending_approval") or (snapshot.next and any("approval" in n or "merge_code" == n for n in snapshot.next)):
+    elif values.get("cancelled"):
+        run.status = WorkflowStatus.CANCELLED
+    elif values.get("pending_approval") or _is_human_pause(snapshot):
         run.status = WorkflowStatus.WAITING_APPROVAL
     elif snapshot.next:
         run.status = WorkflowStatus.RUNNING
@@ -411,6 +412,7 @@ def build_workflow_response(run: WorkflowRun) -> dict[str, Any]:
         "repo_analysis": state.get("repo_analysis"),
         "git_branch": state.get("git_branch"),
         "cancel_message": state.get("cancel_message"),
+        "errors": state.get("errors") or [],
         "session_error": state.get("session_error"),
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),

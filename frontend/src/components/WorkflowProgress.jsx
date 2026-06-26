@@ -48,7 +48,7 @@ export default function WorkflowProgress({ steps = [], progressPercent = 0, stat
 
       <ol className="relative space-y-0">
         {steps.map((step, i) => {
-          const isApproval = step.id?.startsWith('approval')
+          const isApproval = step.id?.startsWith('approval') || step.id === 'merge_code'
           const isActive = step.status === 'running'
           const isDone = step.status === 'completed'
           return (

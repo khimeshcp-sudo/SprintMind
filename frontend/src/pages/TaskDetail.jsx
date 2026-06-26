@@ -285,6 +285,23 @@ export default function TaskDetail() {
         </div>
       )}
 
+      {workflow?.cancel_message && workflow?.status === 'cancelled' && (
+        <div className="mb-6 rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-3 text-sm text-orange-300">
+          {workflow.cancel_message}
+        </div>
+      )}
+
+      {(workflow?.errors?.length > 0 && (workflow?.status === 'cancelled' || workflow?.status === 'failed' || workflow?.current_step === 'merge_code')) && (
+        <div className="mb-6 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
+          <p className="font-medium">Workflow error</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5">
+            {workflow.errors.map((err, i) => (
+              <li key={i} className="whitespace-pre-wrap break-words">{err}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {workflow?.session_error && (
         <div className="mb-6 rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-3 text-sm text-orange-300">
           {workflow.session_error}
@@ -353,15 +370,23 @@ export default function TaskDetail() {
           )}
           {workflow?.merge_request_url && (
             <div className="card">
-              <h3 className="mb-3 font-semibold">Merge Request</h3>
+              <h3 className="mb-3 font-semibold">Pull Request</h3>
               <a
                 href={workflow.merge_request_url}
                 target="_blank"
                 rel="noreferrer"
-                className="text-brand-300 hover:underline"
+                className="break-all text-brand-300 hover:underline"
               >
                 {workflow.merge_request_url}
               </a>
+              {workflow?.merge_result?.merge_warnings?.length > 0 && (
+                <p className="mt-2 text-xs text-amber-300">
+                  Auto-merge unavailable: {workflow.merge_result.merge_warnings.join('; ')}
+                </p>
+              )}
+              {workflow?.merge_result?.auto_merged && (
+                <p className="mt-2 text-xs text-green-400">Merged into main automatically.</p>
+              )}
             </div>
           )}
         </div>

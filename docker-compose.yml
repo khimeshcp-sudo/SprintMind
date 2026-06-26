@@ -72,6 +72,8 @@ services:
       OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:1b}
       MAGENTO_GIT_API_BASE_URL: ${MAGENTO_GIT_API_BASE_URL:-https://api.github.com/repos/khimeshcp-sudo/m249}
       MAGENTO_GIT_API_TOKEN: ${MAGENTO_GIT_API_TOKEN:-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}
+      MAGENTO_GIT_USER_NAME: ${MAGENTO_GIT_USER_NAME:-SprintMind Bot}
+      MAGENTO_GIT_USER_EMAIL: ${MAGENTO_GIT_USER_EMAIL:-sprintmind-bot@users.noreply.github.com}
     volumes:
       - ./backend/app:/app/app
       - ./deploy:/app/deploy

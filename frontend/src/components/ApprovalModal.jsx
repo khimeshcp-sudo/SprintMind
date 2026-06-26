@@ -11,7 +11,12 @@ export default function ApprovalModal({ approval, onDecide, loading }) {
   const display = gate === 'approval_plan'
     ? formatPlanContent(data)
     : gate === 'merge_code'
-    ? `Branch: ${data?.branch || 'unknown'}\nMerge Request: ${data?.merge_request_url || 'not created yet'}`
+    ? [
+        `Branch: ${data?.branch || 'unknown'}`,
+        data?.merge_request_url
+          ? `Pull Request: ${data.merge_request_url}`
+          : 'Pull Request: will be created after approval',
+      ].join('\n')
     : typeof data === 'string'
     ? data
     : JSON.stringify(data, null, 2)
@@ -55,7 +60,7 @@ export default function ApprovalModal({ approval, onDecide, loading }) {
             disabled={loading}
             onClick={() => onDecide(false, feedback)}
           >
-            <X className="h-4 w-4" /> Reject / Revise
+            <X className="h-4 w-4" /> {gate === 'merge_code' ? 'Reject' : 'Reject / Revise'}
           </button>
         </div>
         <p className="mt-3 text-center text-xs text-gray-500">Step: {gate}</p>

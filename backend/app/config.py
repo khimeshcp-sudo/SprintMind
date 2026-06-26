@@ -37,6 +37,8 @@ class Settings(BaseSettings):
     magento_git_create_branch: bool = True
     magento_git_api_token: str = ""
     magento_git_api_base_url: str = ""
+    magento_git_user_name: str = "SprintMind Bot"
+    magento_git_user_email: str = "sprintmind-bot@users.noreply.github.com"
 
     llm_debug: bool = True
     llm_debug_full: bool = True
