@@ -8,12 +8,13 @@ Read the task description below (from a Jira/CSV export) and write a clear imple
 
 Your plan must include:
 - Requirement summary
-- Acceptance criteria (extract from the description)
-- Technical approach (Magento modules, files, APIs, UI)
+- Acceptance criteria (extract from the description — numbered list)
+- Technical approach: Magento module name suggestion, EVERY file to create (full paths under app/code/Vendor/Module/), controllers, observers, plugins, layout XML, templates, JS
 - Testing approach
 - Risks and rough time estimate
 
-Write in clear, readable markdown. Do NOT return JSON — use headings and bullet lists."""
+Write in clear, readable markdown. Do NOT return JSON — use headings and bullet lists.
+Use ## Acceptance Criteria and ## Technical Approach as section headings."""
 
 
 def enrich_requirement(requirement: dict) -> dict:

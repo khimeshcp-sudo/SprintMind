@@ -3,6 +3,19 @@ import { Plus, Upload, Trash2, Pencil, X, Loader2, Paperclip, Bot } from 'lucide
 import { Link } from 'react-router-dom'
 import { api } from '../api/client'
 
+const JIRA_KEY_PATTERN = /^[A-Z][A-Z0-9]+-\d+$/
+
+function normalizeJiraKey(value) {
+  return (value || '').trim().toUpperCase()
+}
+
+function validateJiraKey(value) {
+  const key = normalizeJiraKey(value)
+  if (!key) return 'Jira ID is required (e.g. TAR-3111)'
+  if (!JIRA_KEY_PATTERN.test(key)) return 'Use PROJECT-NUMBER format (e.g. TAR-3111)'
+  return ''
+}
+
 export default function Tasks() {
   const [tasks, setTasks] = useState([])
   const [loading, setLoading] = useState(true)
@@ -43,7 +56,7 @@ export default function Tasks() {
     const fd = new FormData()
     fd.append('title', form.title)
     fd.append('description', form.description)
-    if (form.jira_key) fd.append('jira_key', form.jira_key)
+    fd.append('jira_key', normalizeJiraKey(form.jira_key))
     if (editId) fd.append('status', form.status)
     if (form.file) fd.append('file', form.file)
     return fd
@@ -52,6 +65,12 @@ export default function Tasks() {
   const handleSubmit = async (e) => {
     e.preventDefault()
     setError('')
+    const jiraError = validateJiraKey(form.jira_key)
+    if (jiraError) {
+      setError(jiraError)
+      return
+    }
+    const jiraKey = normalizeJiraKey(form.jira_key)
     try {
       if (editId) {
         if (form.file) {
@@ -60,7 +79,7 @@ export default function Tasks() {
           await api.updateTask(editId, {
             title: form.title,
             description: form.description,
-            jira_key: form.jira_key || null,
+            jira_key: jiraKey,
             status: form.status,
           })
         }
@@ -70,7 +89,7 @@ export default function Tasks() {
         await api.createTask({
           title: form.title,
           description: form.description,
-          jira_key: form.jira_key || null,
+          jira_key: jiraKey,
         })
       }
       resetForm()
@@ -138,8 +157,17 @@ export default function Tasks() {
               <textarea className="input-field min-h-[100px] resize-y" value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} />
             </div>
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-gray-300">Jira Key</label>
-              <input className="input-field" placeholder="MAG-123" value={form.jira_key} onChange={(e) => setForm({ ...form, jira_key: e.target.value })} />
+              <label className="mb-1.5 block text-sm font-medium text-gray-300">Jira ID *</label>
+              <input
+                className="input-field uppercase"
+                placeholder="TAR-3111"
+                value={form.jira_key}
+                onChange={(e) => setForm({ ...form, jira_key: e.target.value.toUpperCase() })}
+                required
+                pattern="[A-Z][A-Z0-9]+-\d+"
+                title="PROJECT-NUMBER format, e.g. TAR-3111"
+              />
+              <p className="mt-1 text-xs text-gray-500">Used for git branch name: feature/TAR-3111</p>
             </div>
             {editId && (
               <div>

@@ -94,6 +94,10 @@ export default function TaskDetail() {
   }, [polling, actionLoading, workflow?.status, loadWorkflow])
 
   const startFlow = async () => {
+    if (!task?.jira_key) {
+      setError('Jira ID is required — edit the task and add a Jira ID (e.g. TAR-3111) before starting the AI flow.')
+      return
+    }
     setActionLoading(true)
     setPolling(true)
     setError('')
@@ -135,6 +139,10 @@ export default function TaskDetail() {
   }
 
   const restartFlow = async () => {
+    if (!task?.jira_key) {
+      setError('Jira ID is required — edit the task and add a Jira ID (e.g. TAR-3111) before restarting.')
+      return
+    }
     setActionLoading(true)
     setPolling(true)
     setError('')
@@ -200,10 +208,11 @@ export default function TaskDetail() {
   const isActive =
     workflow?.status === 'running' || workflow?.status === 'waiting_approval'
   const canStart =
-    !workflow ||
-    workflow.status === 'completed' ||
-    workflow.status === 'failed' ||
-    workflow.status === 'cancelled'
+    task?.jira_key &&
+    (!workflow ||
+      workflow.status === 'completed' ||
+      workflow.status === 'failed' ||
+      workflow.status === 'cancelled')
 
   const approvalPayload = workflow?.waiting_approval || null
 
@@ -227,8 +236,10 @@ export default function TaskDetail() {
             <Bot className="h-8 w-8 text-brand-400" />
             <h1 className="text-3xl font-bold">{task.title}</h1>
           </div>
-          {task.jira_key && (
-            <p className="mt-1 text-sm text-brand-300">{task.jira_key}</p>
+          {task.jira_key ? (
+            <p className="mt-1 text-sm text-brand-300">{task.jira_key} → branch feature/{task.jira_key}</p>
+          ) : (
+            <p className="mt-1 text-sm text-amber-300">Jira ID required to start AI flow (e.g. TAR-3111)</p>
           )}
           <p className="mt-3 max-w-2xl text-gray-400">{task.description || 'No description'}</p>
           <div className="mt-4 flex flex-wrap gap-3 text-sm text-gray-500">
@@ -291,9 +302,16 @@ export default function TaskDetail() {
         </div>
       )}
 
-      {(workflow?.errors?.length > 0 && (workflow?.status === 'cancelled' || workflow?.status === 'failed' || workflow?.current_step === 'merge_code')) && (
+      {(workflow?.errors?.length > 0) && (
         <div className="mb-6 rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-300">
-          <p className="font-medium">Workflow error</p>
+          <p className="font-medium">
+            Workflow errors
+            {workflow?.current_step && (
+              <span className="ml-2 font-normal text-red-200/80">
+                (step: {workflow.current_step.replace(/_/g, ' ')})
+              </span>
+            )}
+          </p>
           <ul className="mt-2 list-disc space-y-1 pl-5">
             {workflow.errors.map((err, i) => (
               <li key={i} className="whitespace-pre-wrap break-words">{err}</li>
@@ -379,13 +397,8 @@ export default function TaskDetail() {
               >
                 {workflow.merge_request_url}
               </a>
-              {workflow?.merge_result?.merge_warnings?.length > 0 && (
-                <p className="mt-2 text-xs text-amber-300">
-                  Auto-merge unavailable: {workflow.merge_result.merge_warnings.join('; ')}
-                </p>
-              )}
-              {workflow?.merge_result?.auto_merged && (
-                <p className="mt-2 text-xs text-green-400">Merged into main automatically.</p>
+              {workflow?.merge_result?.message && (
+                <p className="mt-2 text-xs text-brand-300">{workflow.merge_result.message}</p>
               )}
             </div>
           )}

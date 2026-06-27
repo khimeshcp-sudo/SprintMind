@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import get_current_user, require_admin
 from app.config import settings
 from app.database import get_db
+from app.jira_utils import validate_jira_key
 from app.models import Task, TaskStatus, User, UserRole
 from app.schemas import DashboardStats, TaskCreate, TaskOut, TaskUpdate
 from app.services import dashboard_stats
@@ -17,6 +18,13 @@ from app.subscription_service import enforce_task_creation
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 UPLOAD_DIR = Path(settings.upload_dir)
+
+
+def _parse_jira_form(jira_key: str | None) -> str:
+    try:
+        return validate_jira_key(jira_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 async def _save_upload_file(user: User, file: UploadFile) -> tuple[str, str]:
@@ -70,11 +78,12 @@ async def upload_task(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     title: Annotated[str, Form()],
+    jira_key: Annotated[str, Form()],
     description: Annotated[str, Form()] = "",
-    jira_key: Annotated[str | None, Form()] = None,
     file: UploadFile | None = File(None),
 ):
     await enforce_task_creation(db, user)
+    parsed_jira = _parse_jira_form(jira_key)
 
     file_name = None
     file_path = None
@@ -85,7 +94,7 @@ async def upload_task(
         user_id=user.id,
         title=title,
         description=description,
-        jira_key=jira_key or None,
+        jira_key=parsed_jira,
         file_name=file_name,
         file_path=file_path,
         status=TaskStatus.PENDING,
@@ -127,15 +136,15 @@ async def update_task_with_file(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
     title: Annotated[str, Form()],
+    jira_key: Annotated[str, Form()],
     description: Annotated[str, Form()] = "",
-    jira_key: Annotated[str | None, Form()] = None,
     status: Annotated[str | None, Form()] = None,
     file: UploadFile | None = File(None),
 ):
     task = await _get_task_or_404(db, task_id, user)
     task.title = title
     task.description = description
-    task.jira_key = jira_key or None
+    task.jira_key = _parse_jira_form(jira_key)
     if status:
         try:
             task.status = TaskStatus(status)

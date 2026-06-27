@@ -6,7 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models import User, WorkflowStatus
+from app.jira_utils import validate_jira_key
+from app.models import Task, User, WorkflowStatus
 from app.routers.tasks import _get_task_or_404
 from app.workflow.runner import (
     build_workflow_response,
@@ -30,6 +31,13 @@ class WorkflowResumeRequest(BaseModel):
     feedback: str = ""
 
 
+def _require_task_jira(task: Task) -> str:
+    try:
+        return validate_jira_key(task.jira_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/workflow/steps")
 async def list_workflow_steps():
     return WORKFLOW_STEPS
@@ -43,6 +51,7 @@ async def workflow_start(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     task = await _get_task_or_404(db, task_id, user)
+    jira_key = _require_task_jira(task)
     existing = await get_workflow_for_task(db, task_id, user.id)
     if existing and existing.status == WorkflowStatus.WAITING_APPROVAL:
         return build_workflow_response(existing)
@@ -50,7 +59,7 @@ async def workflow_start(
     requirement = {
         "title": task.title,
         "description": task.description,
-        "jira_key": task.jira_key,
+        "jira_key": jira_key,
         "file_path": task.file_path,
         "file_name": task.file_name,
     }
@@ -81,6 +90,7 @@ async def workflow_restart(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     task = await _get_task_or_404(db, task_id, user)
+    _require_task_jira(task)
     run, requirement = await restart_workflow(db, task, user.id)
     background_tasks.add_task(restart_workflow_background, run.id, requirement)
     return build_workflow_response(run)

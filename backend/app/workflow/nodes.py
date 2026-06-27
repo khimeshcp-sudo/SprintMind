@@ -18,7 +18,9 @@ from app.workflow.codegen import (
     resolve_workspace,
     write_files,
 )
+from app.workflow.errors import record_step_failure
 from app.workflow.llm import generate, parse_json_from_llm
+from app.workflow.module_context import build_branch_strategy
 from app.workflow.plan_prompts import (
     PLAN_SYSTEM,
     build_plan_from_response,
@@ -31,7 +33,6 @@ from app.workflow.repo_analysis import (
     create_merge_request,
     ensure_git_branch,
     extract_keywords,
-    merge_merge_request,
     push_branch,
 )
 from app.workflow.state import WorkflowGraphState
@@ -100,7 +101,25 @@ async def generate_plan_node(state: WorkflowGraphState) -> dict:
             feedback=feedback,
         )
 
-    raw = await generate(PLAN_SYSTEM, user_message)
+    try:
+        raw = await generate(PLAN_SYSTEM, user_message)
+    except Exception as exc:
+        logger.exception("Plan generation failed")
+        statuses = dict(state.get("step_statuses") or {})
+        fail = record_step_failure(
+            "generate_plan",
+            f"AI plan generation failed: {exc}",
+            statuses=statuses,
+        )
+        return {
+            **fail,
+            "plan": None,
+            "plan_revision": revision,
+            "requirement": req,
+            "approval_feedback": "",
+            "current_step": "generate_plan",
+        }
+
     plan = build_plan_from_response(req, raw, revision=revision, feedback=feedback)
 
     statuses = dict(state.get("step_statuses") or {})
@@ -137,51 +156,80 @@ async def approval_plan_node(state: WorkflowGraphState) -> dict:
         }
 
     req = state.get("requirement") or {}
+    task_id = state.get("task_id", 0)
     keywords = extract_keywords(req)
     repo = analyze_repository(keywords=keywords)
+    branch_strategy = build_branch_strategy(req, state.get("plan"), task_id=task_id)
     git_result = ensure_git_branch(
         req,
-        branch_strategy=repo.get("branch_strategy"),
+        branch_strategy=branch_strategy,
     )
+    repo["branch_strategy"] = branch_strategy
 
-    return {
+    result = {
         "approval_feedback": feedback,
         "step_statuses": statuses,
         "repo_analysis": repo,
         "git_branch": git_result,
         "current_step": "write_code",
         "waiting_approval": None,
-        "errors": [] if git_result.get("success") else [git_result.get("error", "Git branch setup failed")],
     }
+    if not git_result.get("success") and not git_result.get("skipped"):
+        result["errors"] = [
+            f"Git setup: {git_result.get('error', 'Git branch setup failed')}",
+        ]
+    return result
 
 
 async def write_code_node(state: WorkflowGraphState) -> dict:
     task_id = state.get("task_id", 0)
     req = state.get("requirement", {})
-    plan = state.get("plan", {})
+    plan = state.get("plan") or {}
     feedback = state.get("approval_feedback", "")
     repo = state.get("repo_analysis") or {}
 
+    if not plan.get("content") and not plan.get("summary"):
+        statuses = dict(state.get("step_statuses") or {})
+        fail = record_step_failure(
+            "write_code",
+            "No approved plan — approve the plan first",
+            statuses=statuses,
+        )
+        return {
+            **fail,
+            "current_step": "approval_code",
+        }
+
     git_result = dict(state.get("git_branch") or {})
     if not git_result.get("success") and not git_result.get("skipped"):
-        git_result = ensure_git_branch(req, branch_strategy=repo.get("branch_strategy"))
+        branch_strategy = build_branch_strategy(req, plan, task_id=task_id)
+        git_result = ensure_git_branch(req, branch_strategy=branch_strategy)
 
     workspace = resolve_workspace(task_id)
-
-    files = await generate_code_files(req, plan, repo=repo, feedback=feedback)
-    artifacts = write_files(workspace, files)
+    files, module_identity, warnings = await generate_code_files(
+        req, plan, repo=repo, feedback=feedback, workspace=workspace,
+    )
+    artifacts = write_files(workspace, files, identity=module_identity)
 
     statuses = dict(state.get("step_statuses") or {})
     statuses["write_code"] = "completed" if artifacts else "failed"
-    return {
+
+    result: dict = {
         "code_artifacts": artifacts,
         "git_branch": git_result,
+        "module_identity": module_identity,
         "step_statuses": statuses,
         "current_step": "approval_code",
-        "errors": [] if artifacts else [
-            "LLM did not generate code — check GROQ_API_KEY and LLM_PROVIDER=groq in .env",
-        ],
     }
+
+    if not artifacts:
+        fail_msgs = list(warnings)
+        fail_msgs.append(
+            f"No files written to {module_identity['code_path']}/ — check LLM logs: docker compose logs api"
+        )
+        result.update(record_step_failure("write_code", fail_msgs, statuses=statuses))
+
+    return result
 
 
 async def approval_code_node(state: WorkflowGraphState) -> dict:
@@ -193,14 +241,22 @@ async def approval_code_node(state: WorkflowGraphState) -> dict:
             "artifacts": state.get("code_artifacts", []),
             "plan": state.get("plan"),
             "requirement": state.get("requirement"),
+            "module_identity": state.get("module_identity"),
+            "branch": (state.get("git_branch") or {}).get("branch"),
         },
     })
     approved = bool(decision.get("approved", False))
+    feedback = str(decision.get("feedback", ""))
     statuses = dict(state.get("step_statuses") or {})
     statuses["approval_code"] = "completed" if approved else "failed"
     if not approved:
-        return {"step_statuses": statuses, "current_step": "write_code"}
-    return {"step_statuses": statuses, "current_step": "generate_tests"}
+        return {
+            "approval_feedback": feedback,
+            "step_statuses": statuses,
+            "current_step": "write_code",
+            "waiting_approval": None,
+        }
+    return {"approval_feedback": "", "step_statuses": statuses, "current_step": "generate_tests"}
 
 
 async def generate_tests_node(state: WorkflowGraphState) -> dict:
@@ -318,7 +374,18 @@ async def run_tests_node(state: WorkflowGraphState) -> dict:
     }
     statuses = dict(state.get("step_statuses") or {})
     statuses["run_tests"] = "completed" if failed == 0 else "failed"
-    return {"test_results": results, "step_statuses": statuses, "current_step": "approval_test_run"}
+    result: dict = {
+        "test_results": results,
+        "step_statuses": statuses,
+        "current_step": "approval_test_run",
+    }
+    if failed > 0:
+        fail_msgs = [f"{failed} of {passed + failed} checks failed"]
+        for item in failures[:5]:
+            reason = item.get("reason") or item.get("title") or str(item)
+            fail_msgs.append(str(reason))
+        result.update(record_step_failure("run_tests", fail_msgs, statuses=statuses))
+    return result
 
 
 async def approval_test_run_node(state: WorkflowGraphState) -> dict:
@@ -344,8 +411,8 @@ async def merge_code_node(state: WorkflowGraphState) -> dict:
 
     decision = interrupt({
         "gate": "merge_code",
-        "title": "Merge Code",
-        "message": "Approve to commit generated changes, push the branch, and open a pull request to origin/main.",
+        "title": "Create Pull Request",
+        "message": "Approve to commit generated changes, push the branch, and open a pull request (no automatic merge).",
         "data": {
             "branch": branch_name,
             "merge_request_url": mr_url,
@@ -357,12 +424,12 @@ async def merge_code_node(state: WorkflowGraphState) -> dict:
     statuses["merge_code"] = "completed" if approved else "failed"
 
     if not approved:
+        fail = record_step_failure("merge_code", "Pull request step rejected by user", statuses=statuses)
         return {
-            "step_statuses": statuses,
+            **fail,
             "current_step": "merge_code",
-            "errors": ["Merge Code rejected by user"],
             "cancelled": True,
-            "cancel_message": "Merge Code rejected by user",
+            "cancel_message": "Pull request step rejected by user",
         }
 
     req = state.get("requirement") or {}
@@ -371,7 +438,6 @@ async def merge_code_node(state: WorkflowGraphState) -> dict:
     branch = branch_name
     errors: list[str] = []
     mr_data: dict = {}
-    merge_warnings: list[str] = []
 
     artifacts = list(state.get("code_artifacts") or [])
     test_files = (state.get("test_results") or {}).get("test_files") or []
@@ -413,41 +479,28 @@ async def merge_code_node(state: WorkflowGraphState) -> dict:
                 )
             raise RuntimeError(err)
         mr_data = mr_result
-
-        merge_result = merge_merge_request(mr_result.get("id"), mr_result.get("web_url"))
-        if not merge_result.get("success"):
-            merge_warnings.append(merge_result.get("error", "Automatic merge not available"))
     except Exception as exc:
         logger.exception("Merge Code failed for task %s", state.get("task_id"))
         errors.append(str(exc))
 
     if errors:
         logger.error("Merge Code errors: %s", errors)
-        statuses["merge_code"] = "failed"
+        fail = record_step_failure("merge_code", errors, statuses=statuses)
         return {
-            "step_statuses": statuses,
+            **fail,
             "current_step": "merge_code",
-            "errors": errors,
             "merge_request_url": mr_data.get("web_url") if mr_data else None,
             "merge_result": mr_data or None,
             "cancelled": True,
-            "cancel_message": f"Merge Code failed: {errors[0]}",
+            "cancel_message": f"Pull request failed: {errors[0]}",
         }
 
     merge_result_payload = {
         **mr_data,
-        "auto_merged": not merge_warnings,
-        "merge_warnings": merge_warnings,
+        "auto_merged": False,
+        "merge_warnings": [],
+        "message": "Pull request created — review and merge manually in GitHub/GitLab.",
     }
-
-    if merge_warnings:
-        return {
-            "step_statuses": statuses,
-            "current_step": "merge_code",
-            "merge_request_url": mr_data.get("web_url"),
-            "merge_request_id": mr_data.get("id"),
-            "merge_result": merge_result_payload,
-        }
 
     return {
         "step_statuses": statuses,
@@ -474,26 +527,49 @@ async def deploy_staging_node(state: WorkflowGraphState) -> dict:
         success = True  # dry-run ok in dev
 
     statuses = dict(state.get("step_statuses") or {})
-    statuses["deploy_staging"] = "completed"
-    return {
+    statuses["deploy_staging"] = "completed" if success else "failed"
+    result: dict = {
         "staging_deploy": {"success": success, "log": log, "environment": "staging"},
         "step_statuses": statuses,
         "current_step": "smoke_staging",
     }
+    if not success:
+        result.update(record_step_failure("deploy_staging", log or "Staging deploy failed", statuses=statuses))
+    return result
 
 
 async def smoke_staging_node(state: WorkflowGraphState) -> dict:
     smoke = await _run_smoke_checks(state, "staging")
     statuses = dict(state.get("step_statuses") or {})
     statuses["smoke_staging"] = "completed" if smoke.get("failed", 0) == 0 else "failed"
-    return {"staging_smoke": smoke, "step_statuses": statuses, "current_step": "approval_staging"}
+    result: dict = {
+        "staging_smoke": smoke,
+        "step_statuses": statuses,
+        "current_step": "approval_staging",
+    }
+    if smoke.get("failed", 0) > 0:
+        checks = smoke.get("checks") or []
+        fail_msgs = [f"{smoke['failed']} staging smoke check(s) failed"]
+        fail_msgs.extend(str(c) for c in checks[:3])
+        result.update(record_step_failure("smoke_staging", fail_msgs, statuses=statuses))
+    return result
 
 
 async def smoke_production_node(state: WorkflowGraphState) -> dict:
     smoke = await _run_smoke_checks(state, "production")
     statuses = dict(state.get("step_statuses") or {})
     statuses["smoke_production"] = "completed" if smoke.get("failed", 0) == 0 else "failed"
-    return {"production_smoke": smoke, "step_statuses": statuses, "current_step": "approval_production"}
+    result: dict = {
+        "production_smoke": smoke,
+        "step_statuses": statuses,
+        "current_step": "approval_production",
+    }
+    if smoke.get("failed", 0) > 0:
+        checks = smoke.get("checks") or []
+        fail_msgs = [f"{smoke['failed']} production smoke check(s) failed"]
+        fail_msgs.extend(str(c) for c in checks[:3])
+        result.update(record_step_failure("smoke_production", fail_msgs, statuses=statuses))
+    return result
 
 
 async def _run_smoke_checks(state: WorkflowGraphState, environment: str) -> dict:
@@ -557,12 +633,15 @@ async def deploy_production_node(state: WorkflowGraphState) -> dict:
         success = True
 
     statuses = dict(state.get("step_statuses") or {})
-    statuses["deploy_production"] = "completed"
-    return {
+    statuses["deploy_production"] = "completed" if success else "failed"
+    result: dict = {
         "production_deploy": {"success": success, "log": log, "environment": "production"},
         "step_statuses": statuses,
         "current_step": "smoke_production",
     }
+    if not success:
+        result.update(record_step_failure("deploy_production", log or "Production deploy failed", statuses=statuses))
+    return result
 
 
 async def approval_production_node(state: WorkflowGraphState) -> dict:

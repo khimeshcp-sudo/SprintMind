@@ -342,23 +342,34 @@ def parse_json_from_llm(text: str) -> dict | list:
 
 
 async def generate_for_codegen(system: str, user: str) -> str | None:
-    """Call LLM for code generation. Prefers Groq. Returns None if all providers fail."""
+    """Run configured LLM provider first, then fallbacks."""
     timeout = settings.llm_timeout_seconds
-    providers: list[tuple[str, Callable[..., object]]] = []
+    provider = (settings.llm_provider or "groq").lower().strip()
+    chain: list[tuple[str, Callable[..., object]]] = []
+
+    def add(name: str, fn: Callable[..., object]) -> None:
+        if (name, fn) not in chain:
+            chain.append((name, fn))
+
+    if provider == "openai" and settings.openai_api_key:
+        add("openai", _openai_generate)
+    elif provider == "groq" and settings.groq_api_key:
+        add("groq", _groq_generate)
+    elif provider == "gemini" and settings.gemini_api_key:
+        add("gemini", _gemini_generate)
+    elif provider == "ollama" and settings.ollama_enabled:
+        add("ollama", _ollama_generate)
 
     if settings.groq_api_key:
-        providers.append(("groq", _groq_generate))
-    provider = (settings.llm_provider or "ollama").lower().strip()
-    if provider == "groq" and settings.groq_api_key:
-        pass  # already first
-    elif provider == "openai" and settings.openai_api_key:
-        providers.append(("openai", _openai_generate))
-    elif provider == "gemini" and settings.gemini_api_key:
-        providers.append(("gemini", _gemini_generate))
-    elif provider == "ollama" and settings.ollama_enabled:
-        providers.append(("ollama", _ollama_generate))
+        add("groq", _groq_generate)
+    if settings.openai_api_key:
+        add("openai", _openai_generate)
+    if settings.gemini_api_key:
+        add("gemini", _gemini_generate)
+    if settings.ollama_enabled:
+        add("ollama", _ollama_generate)
 
-    for name, fn in providers:
+    for name, fn in chain:
         try:
             response = await fn(system, user, timeout=timeout)
             _log_llm_exchange(
@@ -371,5 +382,4 @@ async def generate_for_codegen(system: str, user: str) -> str | None:
             return response
         except Exception as exc:
             logger.warning("codegen %s failed: %s", name, exc)
-
     return None

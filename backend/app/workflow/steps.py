@@ -10,7 +10,7 @@ WORKFLOW_STEPS = [
     {"id": "approval_tests", "label": "Approve Tests", "icon": "user"},
     {"id": "run_tests", "label": "Run Tests", "icon": "play"},
     {"id": "approval_test_run", "label": "Approve Test Results", "icon": "user"},
-    {"id": "merge_code", "label": "Merge Code", "icon": "code"},
+    {"id": "merge_code", "label": "Create Pull Request", "icon": "code"},
     {"id": "deploy_staging", "label": "Deploy Staging", "icon": "rocket"},
     {"id": "smoke_staging", "label": "Smoke Test (Staging)", "icon": "check"},
     {"id": "approval_staging", "label": "Approve Staging", "icon": "user"},

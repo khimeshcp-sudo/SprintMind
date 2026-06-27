@@ -39,6 +39,9 @@ export default function WorkflowProgress({ steps = [], progressPercent = 0, stat
         {status === 'running' && (
           <p className="mt-2 text-xs text-brand-300">AI agents are working…</p>
         )}
+        {status === 'failed' && (
+          <p className="mt-2 text-xs text-red-300">A workflow step failed — see errors below.</p>
+        )}
         {status === 'cancelled' && (
           <p className="mt-2 text-xs text-orange-300">
             {cancelMessage || 'Workflow stopped.'}
@@ -51,12 +54,13 @@ export default function WorkflowProgress({ steps = [], progressPercent = 0, stat
           const isApproval = step.id?.startsWith('approval') || step.id === 'merge_code'
           const isActive = step.status === 'running'
           const isDone = step.status === 'completed'
+          const isFailed = step.status === 'failed'
           return (
             <li key={step.id} className="relative flex gap-4 pb-6 last:pb-0">
               {i < steps.length - 1 && (
                 <span
                   className={`absolute left-[10px] top-6 h-full w-0.5 transition-colors duration-500 ${
-                    isDone ? 'bg-green-500/50' : 'bg-surface-600'
+                    isDone ? 'bg-green-500/50' : isFailed ? 'bg-red-500/50' : 'bg-surface-600'
                   }`}
                 />
               )}
@@ -65,20 +69,29 @@ export default function WorkflowProgress({ steps = [], progressPercent = 0, stat
               </div>
               <div
                 className={`flex-1 rounded-xl border px-4 py-3 transition-all duration-300 ${
-                  isActive
-                    ? 'border-brand-500/50 bg-brand-500/10 shadow-glow'
-                    : isDone
-                      ? 'border-green-500/20 bg-green-500/5'
-                      : 'border-surface-600/50 bg-surface-800/50'
+                  isFailed
+                    ? 'border-red-500/40 bg-red-500/10'
+                    : isActive
+                      ? 'border-brand-500/50 bg-brand-500/10 shadow-glow'
+                      : isDone
+                        ? 'border-green-500/20 bg-green-500/5'
+                        : 'border-surface-600/50 bg-surface-800/50'
                 }`}
               >
                 <div className="flex items-center gap-2">
                   <span className="text-base">{ICONS[step.icon] || '•'}</span>
-                  <span className={`text-sm font-medium ${isActive ? 'text-white' : 'text-gray-300'}`}>
+                  <span className={`text-sm font-medium ${isActive ? 'text-white' : isFailed ? 'text-red-200' : 'text-gray-300'}`}>
                     {step.label}
                   </span>
                   {isApproval && <User className="h-3.5 w-3.5 text-amber-400" />}
                 </div>
+                {isFailed && step.errors?.length > 0 && (
+                  <ul className="mt-2 space-y-1 text-xs text-red-300">
+                    {step.errors.map((err, j) => (
+                      <li key={j} className="whitespace-pre-wrap break-words">• {err}</li>
+                    ))}
+                  </ul>
+                )}
                 {isActive && (
                   <div className="mt-2 h-1 overflow-hidden rounded-full bg-surface-700">
                     <div className="h-full w-1/3 animate-[shimmer_1.2s_ease-in-out_infinite] rounded-full bg-brand-400" />

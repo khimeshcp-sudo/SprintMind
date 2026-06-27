@@ -5,6 +5,8 @@ from __future__ import annotations
 import operator
 from typing import Annotated, Any, TypedDict
 
+from app.workflow.errors import merge_step_errors
+
 
 class WorkflowGraphState(TypedDict, total=False):
     task_id: int
@@ -16,6 +18,7 @@ class WorkflowGraphState(TypedDict, total=False):
     repo_analysis: dict
     git_branch: dict
     code_artifacts: list[dict]
+    module_identity: dict
     test_cases: list[dict]
     test_results: dict
     staging_deploy: dict
@@ -30,4 +33,5 @@ class WorkflowGraphState(TypedDict, total=False):
     waiting_approval: dict | None
     approval_feedback: str
     errors: Annotated[list[str], operator.add]
+    step_errors: Annotated[dict[str, list[str]], merge_step_errors]
     finished: bool

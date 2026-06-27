@@ -1,7 +1,8 @@
 from datetime import datetime
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
+from app.jira_utils import validate_jira_key
 from app.models import SubscriptionStatus, TaskStatus, UserRole
 
 
@@ -125,7 +126,12 @@ class TaskOut(BaseModel):
 class TaskCreate(BaseModel):
     title: str
     description: str = ""
-    jira_key: str | None = None
+    jira_key: str
+
+    @field_validator("jira_key")
+    @classmethod
+    def check_jira_key(cls, value: str) -> str:
+        return validate_jira_key(value)
 
 
 class TaskUpdate(BaseModel):
@@ -133,6 +139,13 @@ class TaskUpdate(BaseModel):
     description: str | None = None
     jira_key: str | None = None
     status: TaskStatus | None = None
+
+    @field_validator("jira_key")
+    @classmethod
+    def check_jira_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        return validate_jira_key(value)
 
 
 # ── Dashboard ─────────────────────────────────────────────────────

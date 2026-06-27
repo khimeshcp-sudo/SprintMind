@@ -118,6 +118,7 @@ def initial_state(task_id: int, user_id: int, thread_id: str, requirement: dict)
         code_artifacts=[],
         test_cases=[],
         errors=[],
+        step_errors={},
         step_statuses=statuses,
         current_step="parse_requirement",
         waiting_approval=None,

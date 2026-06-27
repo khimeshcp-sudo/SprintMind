@@ -272,7 +272,10 @@ def _suggest_branch(keywords: list[str], feature_branches: list[str], status: st
         }
 
     slug = re.sub(r"[^a-z0-9]+", "-", (keywords[0] if keywords else "task").lower())[:30].strip("-")
-    new_branch = f"feature/{jira}-{slug}" if jira else f"feature/{slug}"
+    if jira:
+        new_branch = f"feature/{jira}"
+    else:
+        new_branch = f"feature/{slug}"
     return {
         "action": "create",
         "branch": new_branch,
@@ -329,6 +332,17 @@ def extract_keywords(requirement: dict) -> list[str]:
 def _current_branch(root: Path) -> str:
     _, out = _run_git(["branch", "--show-current"], root)
     return out.strip()
+
+
+def _next_available_branch(root: Path, base_name: str) -> str:
+    """Return base_name or base_name-N if the branch already exists locally."""
+    if not _branch_exists(root, base_name):
+        return base_name
+    for n in range(2, 100):
+        candidate = f"{base_name}-{n}"
+        if not _branch_exists(root, candidate):
+            return candidate
+    return f"{base_name}-new"
 
 
 def _branch_exists(root: Path, name: str) -> bool:
@@ -728,21 +742,27 @@ def ensure_git_branch(
         }
 
     if _branch_exists(root, branch_name):
-        rc, out = log_step(["checkout", branch_name])
-        if rc == 0:
+        if action == "create":
+            original = branch_name
+            branch_name = _next_available_branch(root, branch_name)
+            if branch_name != original:
+                logs.append(f"Branch {original} exists — using {branch_name} for this task")
+        else:
+            rc, out = log_step(["checkout", branch_name])
+            if rc == 0:
+                return {
+                    "success": True,
+                    "action": "checkout_existing",
+                    "branch": branch_name,
+                    "message": f"Branch {branch_name} already exists — checked out",
+                    "logs": logs,
+                }
             return {
-                "success": True,
-                "action": "checkout_existing",
+                "success": False,
                 "branch": branch_name,
-                "message": f"Branch {branch_name} already exists — checked out",
+                "error": out or f"Branch exists but checkout failed: {branch_name}",
                 "logs": logs,
             }
-        return {
-            "success": False,
-            "branch": branch_name,
-            "error": out or f"Branch exists but checkout failed: {branch_name}",
-            "logs": logs,
-        }
 
     _, porcelain = _run_git(["status", "--porcelain"], root)
     # Auto-stash tracked changes to allow branch creation

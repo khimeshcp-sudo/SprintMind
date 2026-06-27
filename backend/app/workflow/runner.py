@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session
 from app.models import Task, TaskStatus, WorkflowRun, WorkflowStatus
+from app.workflow.errors import apply_failure_to_state
 from app.workflow.graph import build_workflow, initial_state
 from app.workflow.steps import STEP_ORDER, WORKFLOW_STEPS
 
@@ -98,6 +99,19 @@ async def _stream_until_pause(db: AsyncSession, run: WorkflowRun, config: dict) 
             break
 
 
+async def _persist_run_failure(db: AsyncSession, run: WorkflowRun, exc: Exception) -> None:
+    state = dict(run.state_json or {})
+    step = state.get("current_step") or run.current_step or "unknown"
+    state = apply_failure_to_state(state, step, str(exc))
+    run.state_json = _serialize_state(state)
+    run.current_step = step
+    run.status = WorkflowStatus.FAILED
+    task = await db.get(Task, run.task_id)
+    if task:
+        task.status = TaskStatus.FAILED
+    await db.commit()
+
+
 async def execute_workflow_start(db: AsyncSession, run: WorkflowRun, requirement: dict) -> None:
     task = await db.get(Task, run.task_id)
     if not task:
@@ -126,11 +140,10 @@ async def execute_workflow_start(db: AsyncSession, run: WorkflowRun, requirement
         await db.refresh(run)
         if run.status != WorkflowStatus.CANCELLED:
             await _sync_run_from_graph(db, run)
-    except Exception:
+    except Exception as exc:
         logger.exception("Workflow start failed for run %s", run.id)
-        run.status = WorkflowStatus.FAILED
-        await db.commit()
-        raise
+        await _persist_run_failure(db, run, exc)
+        return
 
 
 async def execute_workflow_resume(
@@ -154,11 +167,10 @@ async def execute_workflow_resume(
             return
         await _sync_run_from_graph(db, run)
         await _stream_until_pause(db, run, config)
-    except Exception:
+    except Exception as exc:
         logger.exception("Workflow resume failed for run %s", run.id)
-        run.status = WorkflowStatus.FAILED
-        await db.commit()
-        raise
+        await _persist_run_failure(db, run, exc)
+        return
 
 
 async def stop_workflow_run(db: AsyncSession, run: WorkflowRun) -> WorkflowRun:
@@ -351,6 +363,11 @@ async def _sync_run_from_graph(db: AsyncSession, run: WorkflowRun) -> None:
         run.status = WorkflowStatus.CANCELLED
     elif values.get("pending_approval") or _is_human_pause(snapshot):
         run.status = WorkflowStatus.WAITING_APPROVAL
+    elif any(v == "failed" for v in statuses.values()) and current in statuses and statuses[current] == "failed":
+        run.status = WorkflowStatus.FAILED
+        task = await db.get(Task, run.task_id)
+        if task and task.status == TaskStatus.IN_PROGRESS:
+            task.status = TaskStatus.FAILED
     elif snapshot.next:
         run.status = WorkflowStatus.RUNNING
     else:
@@ -363,6 +380,8 @@ async def _sync_run_from_graph(db: AsyncSession, run: WorkflowRun) -> None:
 def build_workflow_response(run: WorkflowRun) -> dict[str, Any]:
     state = run.state_json or {}
     step_statuses = dict(state.get("step_statuses") or {})
+    step_errors_map = dict(state.get("step_errors") or {})
+    global_errors = state.get("errors") or []
     current = run.current_step or state.get("current_step")
     waiting = None
     if run.status == WorkflowStatus.WAITING_APPROVAL:
@@ -382,7 +401,12 @@ def build_workflow_response(run: WorkflowRun) -> dict[str, Any]:
             status = "completed"
         if run.status == WorkflowStatus.CANCELLED and sid == current:
             status = "failed"
-        steps.append({**step_def, "status": status})
+        step_errs = list(step_errors_map.get(sid) or [])
+        if status == "failed" and not step_errs:
+            label = step_def["label"]
+            prefix = f"{label}: "
+            step_errs = [e[len(prefix):] if e.startswith(prefix) else e for e in global_errors if e.startswith(prefix)]
+        steps.append({**step_def, "status": status, "errors": step_errs})
 
     completed = sum(1 for s in steps if s["status"] == "completed")
     running = sum(1 for s in steps if s["status"] == "running")
@@ -412,7 +436,8 @@ def build_workflow_response(run: WorkflowRun) -> dict[str, Any]:
         "repo_analysis": state.get("repo_analysis"),
         "git_branch": state.get("git_branch"),
         "cancel_message": state.get("cancel_message"),
-        "errors": state.get("errors") or [],
+        "errors": global_errors,
+        "step_errors": step_errors_map,
         "session_error": state.get("session_error"),
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
