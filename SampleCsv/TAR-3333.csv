@@ -1,0 +1,19 @@
+Task Id,Title,Description,Status
+TAR-3333,Homepage Product Slider,"Add configurable product slider on homepage.
+
+Admin should enter SKUs in System Configuration.
+
+Products displayed in slider.
+
+Maximum products configurable.
+
+Hide out-of-stock products.
+
+Show:
+
+Image
+Price
+Name
+Add to Cart
+
+Reuse existing product block if available.",Ready
